@@ -243,6 +243,121 @@ Expected signs when WP Rocket is active:
 
 ---
 
+### 12. Load Testing with k6 (WP Rocket Cache Validation)
+
+Optionally run a k6 load test to validate that WP Rocket correctly serves cached pages under concurrent traffic and that performance holds up under real load.
+
+**Prerequisites — check if k6 is available:**
+```bash
+if command -v k6 &>/dev/null; then
+  echo "k6 found: $(k6 version)"
+else
+  echo "[SKIP] k6 not installed — skipping load test (install from https://k6.io/docs/getting-started/installation/)"
+fi
+```
+
+**Write a temporary k6 test script:**
+```bash
+K6_SCRIPT=$(mktemp /tmp/wp-k6-XXXXXX.js)
+cat > "$K6_SCRIPT" << 'EOFK6'
+import http from 'k6/http';
+import { check, sleep } from 'k6';
+import { Rate, Trend } from 'k6/metrics';
+
+// Custom metrics
+const cacheHitRate = new Rate('cache_hit_rate');
+const ttfb = new Trend('ttfb_ms', true);
+
+export const options = {
+  stages: [
+    { duration: '15s', target: 10 },  // ramp up to 10 VUs
+    { duration: '30s', target: 10 },  // hold 10 VUs
+    { duration: '15s', target: 0 },   // ramp down
+  ],
+  thresholds: {
+    http_req_duration: ['p(95)<2500'],  // 95th percentile < 2.5s (LCP target)
+    http_req_failed:   ['rate<0.01'],   // error rate < 1%
+    cache_hit_rate:    ['rate>0.80'],   // WP Rocket cache hit rate > 80%
+    ttfb_ms:           ['p(95)<600'],   // TTFB < 600ms
+  },
+};
+
+const BASE_URL = __ENV.TARGET_URL || 'http://localhost';
+
+const PAGES = [
+  BASE_URL + '/',
+  BASE_URL + '/shop/',
+  BASE_URL + '/cart/',
+];
+
+export default function () {
+  const url = PAGES[Math.floor(Math.random() * PAGES.length)];
+
+  const params = {
+    headers: {
+      'User-Agent': 'Mozilla/5.0 (k6-wp-seo-audit)',
+      'Accept-Encoding': 'gzip, deflate, br',
+    },
+  };
+
+  const res = http.get(url, params);
+
+  // Check cache headers set by WP Rocket / Nginx
+  const xCache        = (res.headers['X-Cache'] || '').toLowerCase();
+  const rocketStatic  = res.headers['X-Rocket-Nginx-Serving-Static'] || '';
+  const cacheControl  = res.headers['Cache-Control'] || '';
+
+  const isCacheHit =
+    xCache.includes('hit') ||
+    rocketStatic !== '' ||
+    cacheControl.includes('max-age');
+
+  cacheHitRate.add(isCacheHit);
+  ttfb.add(res.timings.waiting);  // waiting = TTFB
+
+  check(res, {
+    'status is 200':          (r) => r.status === 200,
+    'no server error':        (r) => r.status < 500,
+    'response has body':      (r) => r.body && r.body.length > 0,
+    'WP Rocket cache active': () => isCacheHit,
+    'TTFB < 600ms':           () => res.timings.waiting < 600,
+  });
+
+  sleep(1);
+}
+EOFK6
+echo "k6 script written to $K6_SCRIPT"
+```
+
+**Run the load test:**
+```bash
+TARGET_URL="$URL" k6 run "$K6_SCRIPT" 2>&1 | tee /tmp/wp-k6-results.txt
+rm -f "$K6_SCRIPT"
+```
+
+**Interpret results — key thresholds:**
+| Metric | Target | Meaning |
+|--------|--------|---------|
+| `http_req_duration` p(95) | < 2500ms | 95% of requests served within LCP target |
+| `http_req_failed` | < 1% | Near-zero error rate under load |
+| `cache_hit_rate` | > 80% | WP Rocket serving cached pages |
+| `ttfb_ms` p(95) | < 600ms | Time To First Byte under load |
+
+**Expected output summary (from k6):**
+```
+[PASS] Load test: p(95) response time < 2.5s
+[PASS] Load test: error rate < 1%
+[PASS] Load test: WP Rocket cache hit rate > 80%
+[WARN] Load test: TTFB p(95) = 720ms — consider enabling WP Rocket static file serving
+```
+
+Add `[PASS]`/`[WARN]`/`[FAIL]` lines to the audit report based on whether each threshold was met. If k6 is not installed, emit:
+```
+[SKIP] Load test: k6 not available — install from https://k6.io/docs/getting-started/installation/
+```
+
+---
+
 ## Output Format
 
 Produce a structured audit report with this format:
@@ -274,12 +389,19 @@ Produce a structured audit report with this format:
 [WARN] Performance: LCP 3.2s (target < 2.5s)
 [FAIL] Performance: CLS 0.25 (target < 0.1)
 
+[PASS] Load test: p(95) response time 1.8s (target < 2.5s)
+[PASS] Load test: error rate 0.2% (target < 1%)
+[WARN] Load test: WP Rocket cache hit rate 74% (target > 80%)
+[WARN] Load test: TTFB p(95) 720ms (target < 600ms)
+
 ============================================================
-  Summary: 8 PASS | 3 WARN | 2 FAIL
+  Summary: 9 PASS | 5 WARN | 2 FAIL
   Priority fixes:
   1. Fix CLS issues (likely caused by images without dimensions)
   2. Fix robots.txt to unblock WP Rocket cache assets
-  3. Add canonical tag to homepage
+  3. Improve WP Rocket cache hit rate (enable preloading / static serving)
+  4. Add canonical tag to homepage
+  5. Investigate TTFB spike under load (server resources or cache warm-up)
 ============================================================
 ```
 
