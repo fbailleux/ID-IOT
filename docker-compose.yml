@@ -1,0 +1,226 @@
+version: "3.9"
+
+# ─────────────────────────────────────────────
+#  Multi-RAG Cognitive System
+#  Cerveau numérique persistant
+# ─────────────────────────────────────────────
+
+networks:
+  cognitive-net:
+    driver: bridge
+
+volumes:
+  ollama_data:
+  qdrant_data:
+  neo4j_data:
+  neo4j_logs:
+  redis_data:
+  postgres_data:
+  open_webui_data:
+  haystack_data:
+
+services:
+
+  # ─────────────────────────────────────────────
+  # LLM Runtime — Ollama
+  # ─────────────────────────────────────────────
+  ollama:
+    image: ollama/ollama:latest
+    container_name: ollama
+    restart: unless-stopped
+    ports:
+      - "11434:11434"
+    volumes:
+      - ollama_data:/root/.ollama
+    environment:
+      - OLLAMA_KEEP_ALIVE=24h
+      - OLLAMA_NUM_PARALLEL=2
+    networks:
+      - cognitive-net
+    deploy:
+      resources:
+        limits:
+          memory: 20G
+
+  # ─────────────────────────────────────────────
+  # Vector RAG — Qdrant
+  # ─────────────────────────────────────────────
+  qdrant:
+    image: qdrant/qdrant:latest
+    container_name: qdrant
+    restart: unless-stopped
+    ports:
+      - "6333:6333"
+      - "6334:6334"
+    volumes:
+      - qdrant_data:/qdrant/storage
+      - ./config/qdrant/config.yaml:/qdrant/config/production.yaml
+    environment:
+      - QDRANT__SERVICE__GRPC_PORT=6334
+    networks:
+      - cognitive-net
+    deploy:
+      resources:
+        limits:
+          memory: 4G
+
+  # ─────────────────────────────────────────────
+  # Graph RAG — Neo4j
+  # ─────────────────────────────────────────────
+  neo4j:
+    image: neo4j:5.15-community
+    container_name: neo4j
+    restart: unless-stopped
+    ports:
+      - "7474:7474"
+      - "7687:7687"
+    volumes:
+      - neo4j_data:/data
+      - neo4j_logs:/logs
+      - ./config/neo4j/neo4j.conf:/conf/neo4j.conf
+    environment:
+      - NEO4J_AUTH=${NEO4J_USER:-neo4j}/${NEO4J_PASSWORD:-cognitive2024}
+      - NEO4J_PLUGINS=["apoc", "graph-data-science"]
+      - NEO4J_dbms_security_procedures_unrestricted=apoc.*,gds.*
+      - NEO4J_dbms_memory_heap_initial__size=2G
+      - NEO4J_dbms_memory_heap_max__size=4G
+      - NEO4J_dbms_memory_pagecache_size=2G
+    networks:
+      - cognitive-net
+    deploy:
+      resources:
+        limits:
+          memory: 8G
+
+  # ─────────────────────────────────────────────
+  # Episodic RAG — Redis (mémoire court terme)
+  # ─────────────────────────────────────────────
+  redis:
+    image: redis:7-alpine
+    container_name: redis
+    restart: unless-stopped
+    ports:
+      - "6379:6379"
+    volumes:
+      - redis_data:/data
+    command: redis-server --appendonly yes --maxmemory 2gb --maxmemory-policy allkeys-lru
+    networks:
+      - cognitive-net
+
+  # ─────────────────────────────────────────────
+  # Episodic RAG — PostgreSQL (mémoire long terme)
+  # ─────────────────────────────────────────────
+  postgres:
+    image: postgres:16-alpine
+    container_name: postgres
+    restart: unless-stopped
+    ports:
+      - "5432:5432"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+      - ./scripts/init_postgres.sql:/docker-entrypoint-initdb.d/init.sql
+    environment:
+      - POSTGRES_DB=${POSTGRES_DB:-cognitive}
+      - POSTGRES_USER=${POSTGRES_USER:-cognitive}
+      - POSTGRES_PASSWORD=${POSTGRES_PASSWORD:-cognitive2024}
+    networks:
+      - cognitive-net
+    deploy:
+      resources:
+        limits:
+          memory: 2G
+
+  # ─────────────────────────────────────────────
+  # Document RAG — Haystack API
+  # ─────────────────────────────────────────────
+  haystack:
+    build:
+      context: .
+      dockerfile: docker/Dockerfile.haystack
+    container_name: haystack
+    restart: unless-stopped
+    ports:
+      - "8001:8001"
+    volumes:
+      - haystack_data:/app/data
+      - ./config/haystack:/app/config
+    environment:
+      - HAYSTACK_TELEMETRY_ENABLED=false
+      - QDRANT_URL=http://qdrant:6333
+      - OLLAMA_URL=http://ollama:11434
+    depends_on:
+      - qdrant
+      - ollama
+    networks:
+      - cognitive-net
+    deploy:
+      resources:
+        limits:
+          memory: 4G
+
+  # ─────────────────────────────────────────────
+  # Cognitive Core — LangGraph + CrewAI
+  # ─────────────────────────────────────────────
+  cognitive-core:
+    build:
+      context: .
+      dockerfile: docker/Dockerfile.cognitive
+    container_name: cognitive-core
+    restart: unless-stopped
+    ports:
+      - "8000:8000"
+    volumes:
+      - ./cognitive_core:/app/cognitive_core
+      - ./rag:/app/rag
+      - ./agents:/app/agents
+      - ./api:/app/api
+      - ./data:/app/data
+    environment:
+      - OLLAMA_BASE_URL=http://ollama:11434
+      - QDRANT_URL=http://qdrant:6333
+      - NEO4J_URI=bolt://neo4j:7687
+      - NEO4J_USER=${NEO4J_USER:-neo4j}
+      - NEO4J_PASSWORD=${NEO4J_PASSWORD:-cognitive2024}
+      - REDIS_URL=redis://redis:6379
+      - POSTGRES_URL=postgresql://${POSTGRES_USER:-cognitive}:${POSTGRES_PASSWORD:-cognitive2024}@postgres:5432/${POSTGRES_DB:-cognitive}
+      - HAYSTACK_URL=http://haystack:8001
+      - DEFAULT_MODEL=${DEFAULT_MODEL:-mistral}
+      - FAST_MODEL=${FAST_MODEL:-phi3:mini}
+      - LOG_LEVEL=${LOG_LEVEL:-INFO}
+    depends_on:
+      - ollama
+      - qdrant
+      - neo4j
+      - redis
+      - postgres
+    networks:
+      - cognitive-net
+    deploy:
+      resources:
+        limits:
+          memory: 4G
+
+  # ─────────────────────────────────────────────
+  # Frontend — Open WebUI
+  # ─────────────────────────────────────────────
+  open-webui:
+    image: ghcr.io/open-webui/open-webui:main
+    container_name: open-webui
+    restart: unless-stopped
+    ports:
+      - "3000:8080"
+    volumes:
+      - open_webui_data:/app/backend/data
+    environment:
+      - OLLAMA_BASE_URL=http://ollama:11434
+      - OPENAI_API_BASE_URL=http://cognitive-core:8000/v1
+      - OPENAI_API_KEY=cognitive-local
+      - WEBUI_SECRET_KEY=${WEBUI_SECRET_KEY:-change-me-in-production}
+      - DEFAULT_MODELS=${DEFAULT_MODEL:-mistral}
+      - ENABLE_RAG_WEB_SEARCH=true
+      - ENABLE_IMAGE_GENERATION=false
+    depends_on:
+      - ollama
+      - cognitive-core
+    networks:
+      - cognitive-net

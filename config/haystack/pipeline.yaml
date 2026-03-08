@@ -1,0 +1,27 @@
+# Haystack Document RAG Pipeline Configuration
+
+retriever:
+  type: QdrantEmbeddingRetriever
+  params:
+    top_k: 5
+    collection_name: cognitive_documents
+
+embedder:
+  type: OllamaTextEmbedder
+  params:
+    model: nomic-embed-text
+    url: http://ollama:11434
+
+reader:
+  type: ExtractiveReader
+  params:
+    model: deepset/roberta-base-squad2
+    max_seq_len: 512
+
+document_store:
+  type: QdrantDocumentStore
+  params:
+    url: http://qdrant:6333
+    collection_name: cognitive_documents
+    embedding_dim: 768
+    recreate_index: false

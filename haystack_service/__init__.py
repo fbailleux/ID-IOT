@@ -1,0 +1,1 @@
+"""Service Haystack — Document RAG"""
