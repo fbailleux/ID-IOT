@@ -91,13 +91,30 @@ open http://localhost:3000
 ### Commandes utiles
 
 ```bash
-make up        # Démarrer tous les services
+make up        # Démarrer tous les services (inclut l'admin)
 make down      # Arrêter
 make status    # État des services
 make logs      # Logs en temps réel
 make models    # Télécharger les modèles Ollama
 make init      # Initialiser les BDD
+make admin     # Vérifier l'interface d'administration
 ```
+
+### Interface d'administration
+
+Disponible sur `http://localhost:8080` dès que les services sont démarrés.
+
+| Section | Fonctionnalités |
+|---------|----------------|
+| **Dashboard** | Santé de tous les services en temps réel |
+| **Test RAG** | Envoyer une requête au système cognitif |
+| **Indexer** | Ajouter des documents dans les RAG |
+| **Ollama** | Télécharger, lister, supprimer des modèles |
+| **Qdrant** | Gérer les collections vectorielles |
+| **Neo4j** | Statistiques, requêtes Cypher, vidage |
+| **Mémoire** | Épisodes Redis/PostgreSQL, flush cache |
+| **Haystack** | Indexation documentaire |
+| **Ray** | État du cluster distribué |
 
 #### Ray (orchestration distribuée)
 
@@ -140,6 +157,7 @@ USE_RAY=true RAY_ADDRESS=ray://ray-head:10001 docker compose up -d cognitive-cor
 | Neo4j HTTP | 7474 |
 | Redis | 6379 |
 | PostgreSQL | 5432 |
+| Admin UI | 8080 |
 | Ray Dashboard (optionnel) | 8265 |
 | Ray Client (optionnel) | 10001 |
 
@@ -191,6 +209,9 @@ ID-IOT/
 │   ├── qdrant/config.yaml
 │   ├── neo4j/neo4j.conf
 │   └── haystack/pipeline.yaml
+├── admin_service/              # Interface d'administration (port 8080)
+│   ├── main.py                # FastAPI — toutes les routes admin
+│   └── static/index.html      # UI single-page (Tailwind + JS vanilla)
 ├── ray_orchestrator/           # Couche Ray distribuée
 │   ├── cluster.py             # Init Ray (local ou cluster distant)
 │   ├── remote_tasks.py        # Tâches @ray.remote pour les 4 RAG

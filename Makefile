@@ -3,7 +3,8 @@
 # ─────────────────────────────────────────────
 
 .PHONY: help up down build logs init models status clean \
-        ray-up ray-down ray-dashboard ray-status
+        ray-up ray-down ray-dashboard ray-status \
+        admin
 
 help: ## Affiche cette aide
 	@grep -E '^[a-zA-Z_-]+:.*?## .*$$' $(MAKEFILE_LIST) | \
@@ -57,6 +58,9 @@ status: ## État des services
 	@echo ""
 	@echo "=== Qdrant ==="
 	@curl -sf http://localhost:6333/health | python3 -m json.tool 2>/dev/null || echo "Qdrant non disponible"
+	@echo ""
+	@echo "=== Admin ==="
+	@curl -sf http://localhost:8080/ > /dev/null 2>&1 && echo "Admin actif : http://localhost:8080" || echo "Admin non disponible"
 
 # ── Ray — Orchestration distribuée ─────────────────────────────────────────
 
@@ -78,6 +82,12 @@ ray-dashboard: ## Affiche l'URL du dashboard Ray
 ray-status: ## État du cluster Ray
 	@echo "=== Ray Cluster ==="
 	@curl -sf http://localhost:8265/api/cluster_status | python3 -m json.tool 2>/dev/null || echo "Ray non disponible"
+
+# ── Admin ──────────────────────────────────────────────────────────────────
+
+admin: ## Ouvre l'interface d'administration (http://localhost:8080)
+	@echo "Admin disponible sur : http://localhost:8080"
+	@curl -sf http://localhost:8080/ > /dev/null 2>&1 && echo "Statut : actif" || echo "Non disponible (lancez make up)"
 
 # ── Nettoyage ──────────────────────────────────────────────────────────────
 

@@ -1,0 +1,583 @@
+<!DOCTYPE html>
+<html lang="fr">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Admin — Cerveau Numérique</title>
+  <script src="https://cdn.tailwindcss.com"></script>
+  <style>
+    body { font-family: 'Inter', system-ui, sans-serif; }
+    .tab-btn.active { background: #2563eb; color: white; }
+    .tab-btn { transition: background 0.15s; }
+    pre { white-space: pre-wrap; word-break: break-word; }
+    .status-up   { background: #16a34a; }
+    .status-down { background: #dc2626; }
+    .status-opt  { background: #ca8a04; }
+    .spinner { border: 2px solid #374151; border-top-color: #3b82f6; border-radius: 50%; width:16px; height:16px; animation: spin .7s linear infinite; display:inline-block; }
+    @keyframes spin { to { transform: rotate(360deg); } }
+  </style>
+</head>
+<body class="bg-gray-950 text-gray-100 flex h-screen overflow-hidden">
+
+  <!-- ── Sidebar ─────────────────────────────────────────────────────── -->
+  <aside class="w-52 bg-gray-900 flex flex-col border-r border-gray-800 shrink-0">
+    <div class="p-4 border-b border-gray-800">
+      <div class="text-xs text-blue-400 font-semibold uppercase tracking-widest mb-1">Cerveau Numérique</div>
+      <div class="text-base font-bold">Administration</div>
+    </div>
+
+    <nav class="flex-1 overflow-y-auto py-2">
+      <div class="px-2 text-xs text-gray-500 uppercase tracking-wider mb-1 mt-2 px-3">Général</div>
+      <button class="tab-btn active w-full text-left px-4 py-2 rounded-lg mx-1 text-sm" data-tab="dashboard"    onclick="showTab('dashboard')">📊 Dashboard</button>
+      <button class="tab-btn w-full text-left px-4 py-2 rounded-lg mx-1 text-sm mt-1" data-tab="test-rag"     onclick="showTab('test-rag')">🧪 Test RAG</button>
+      <button class="tab-btn w-full text-left px-4 py-2 rounded-lg mx-1 text-sm mt-1" data-tab="indexer"      onclick="showTab('indexer')">📥 Indexer</button>
+
+      <div class="px-2 text-xs text-gray-500 uppercase tracking-wider mb-1 mt-4 px-3">Services</div>
+      <button class="tab-btn w-full text-left px-4 py-2 rounded-lg mx-1 text-sm mt-1" data-tab="ollama"       onclick="showTab('ollama')">🦙 Ollama</button>
+      <button class="tab-btn w-full text-left px-4 py-2 rounded-lg mx-1 text-sm mt-1" data-tab="qdrant"       onclick="showTab('qdrant')">🔮 Qdrant</button>
+      <button class="tab-btn w-full text-left px-4 py-2 rounded-lg mx-1 text-sm mt-1" data-tab="neo4j"        onclick="showTab('neo4j')">🕸️ Neo4j</button>
+      <button class="tab-btn w-full text-left px-4 py-2 rounded-lg mx-1 text-sm mt-1" data-tab="episodic"     onclick="showTab('episodic')">🧠 Mémoire</button>
+      <button class="tab-btn w-full text-left px-4 py-2 rounded-lg mx-1 text-sm mt-1" data-tab="haystack"     onclick="showTab('haystack')">📄 Haystack</button>
+      <button class="tab-btn w-full text-left px-4 py-2 rounded-lg mx-1 text-sm mt-1" data-tab="ray"          onclick="showTab('ray')">⚡ Ray</button>
+    </nav>
+
+    <div class="p-3 border-t border-gray-800 text-xs text-gray-500">
+      Port 8080 &mdash; v1.0.0
+    </div>
+  </aside>
+
+  <!-- ── Main ───────────────────────────────────────────────────────── -->
+  <main class="flex-1 overflow-y-auto bg-gray-950">
+
+    <!-- Header -->
+    <div class="sticky top-0 z-10 bg-gray-900 border-b border-gray-800 px-6 py-3 flex items-center justify-between">
+      <div id="page-title" class="text-sm font-semibold text-gray-200">Dashboard</div>
+      <button onclick="refreshCurrent()" class="text-xs bg-gray-800 hover:bg-gray-700 px-3 py-1.5 rounded-md text-gray-300">↻ Actualiser</button>
+    </div>
+
+    <div class="p-6 space-y-6">
+
+      <!-- ═══ DASHBOARD ═══════════════════════════════════════════════ -->
+      <div id="tab-dashboard" class="tab-content space-y-6">
+        <div id="health-grid" class="grid grid-cols-3 gap-4">
+          <div class="col-span-3 text-sm text-gray-400"><span class="spinner"></span> Chargement...</div>
+        </div>
+      </div>
+
+      <!-- ═══ TEST RAG ═════════════════════════════════════════════════ -->
+      <div id="tab-test-rag" class="tab-content hidden space-y-4">
+        <div class="bg-gray-900 rounded-xl p-5 border border-gray-800">
+          <h2 class="text-sm font-semibold mb-4 text-blue-300">Tester une requête cognitive</h2>
+          <textarea id="rag-query" rows="3" placeholder="Votre question..."
+            class="w-full bg-gray-800 border border-gray-700 rounded-lg px-3 py-2 text-sm resize-none focus:outline-none focus:border-blue-500"></textarea>
+          <div class="flex items-center gap-3 mt-3">
+            <button onclick="testRag()" class="bg-blue-600 hover:bg-blue-700 px-4 py-2 rounded-lg text-sm font-medium">Envoyer</button>
+            <span id="rag-loading" class="hidden text-xs text-gray-400"><span class="spinner"></span> En cours...</span>
+          </div>
+        </div>
+        <div id="rag-result" class="hidden bg-gray-900 rounded-xl p-5 border border-gray-800">
+          <h3 class="text-xs font-semibold text-gray-400 mb-3 uppercase tracking-wider">Résultat</h3>
+          <pre id="rag-answer" class="text-sm text-gray-200 leading-relaxed"></pre>
+          <div id="rag-meta" class="mt-3 text-xs text-gray-500"></div>
+        </div>
+      </div>
+
+      <!-- ═══ INDEXER ═════════════════════════════════════════════════ -->
+      <div id="tab-indexer" class="tab-content hidden space-y-4">
+        <div class="bg-gray-900 rounded-xl p-5 border border-gray-800">
+          <h2 class="text-sm font-semibold mb-4 text-blue-300">Indexer un document</h2>
+          <input id="idx-title" type="text" placeholder="Titre (optionnel)"
+            class="w-full bg-gray-800 border border-gray-700 rounded-lg px-3 py-2 text-sm mb-3 focus:outline-none focus:border-blue-500">
+          <textarea id="idx-content" rows="6" placeholder="Contenu du document..."
+            class="w-full bg-gray-800 border border-gray-700 rounded-lg px-3 py-2 text-sm resize-none focus:outline-none focus:border-blue-500"></textarea>
+          <div class="flex items-center gap-3 mt-3">
+            <select id="idx-type" class="bg-gray-800 border border-gray-700 rounded-lg px-3 py-2 text-sm focus:outline-none">
+              <option value="vector">Vector RAG (Qdrant)</option>
+              <option value="document">Document RAG (Haystack)</option>
+              <option value="graph">Graph RAG (Neo4j)</option>
+            </select>
+            <button onclick="indexDoc()" class="bg-green-700 hover:bg-green-600 px-4 py-2 rounded-lg text-sm font-medium">Indexer</button>
+          </div>
+        </div>
+        <div id="idx-result" class="hidden bg-gray-900 rounded-xl p-4 border border-gray-800 text-sm"></div>
+      </div>
+
+      <!-- ═══ OLLAMA ═══════════════════════════════════════════════════ -->
+      <div id="tab-ollama" class="tab-content hidden space-y-4">
+        <div class="bg-gray-900 rounded-xl p-5 border border-gray-800">
+          <h2 class="text-sm font-semibold mb-4 text-blue-300">Télécharger un modèle</h2>
+          <div class="flex gap-3">
+            <input id="pull-model" type="text" placeholder="mistral, phi3:mini, llama3..."
+              class="flex-1 bg-gray-800 border border-gray-700 rounded-lg px-3 py-2 text-sm focus:outline-none focus:border-blue-500">
+            <button onclick="pullModel()" class="bg-blue-600 hover:bg-blue-700 px-4 py-2 rounded-lg text-sm font-medium">Télécharger</button>
+          </div>
+          <div id="pull-status" class="mt-2 text-xs text-gray-400"></div>
+        </div>
+        <div class="bg-gray-900 rounded-xl border border-gray-800">
+          <div class="p-4 border-b border-gray-800">
+            <h2 class="text-sm font-semibold text-blue-300">Modèles installés</h2>
+          </div>
+          <div id="ollama-list" class="p-4 text-sm text-gray-400"><span class="spinner"></span> Chargement...</div>
+        </div>
+      </div>
+
+      <!-- ═══ QDRANT ═══════════════════════════════════════════════════ -->
+      <div id="tab-qdrant" class="tab-content hidden space-y-4">
+        <div class="bg-gray-900 rounded-xl border border-gray-800">
+          <div class="p-4 border-b border-gray-800">
+            <h2 class="text-sm font-semibold text-blue-300">Collections Qdrant</h2>
+          </div>
+          <div id="qdrant-list" class="p-4 text-sm text-gray-400"><span class="spinner"></span> Chargement...</div>
+        </div>
+      </div>
+
+      <!-- ═══ NEO4J ═════════════════════════════════════════════════════ -->
+      <div id="tab-neo4j" class="tab-content hidden space-y-4">
+        <div id="neo4j-stats" class="grid grid-cols-3 gap-4">
+          <div class="col-span-3 text-sm text-gray-400"><span class="spinner"></span> Chargement...</div>
+        </div>
+
+        <div class="bg-gray-900 rounded-xl p-5 border border-gray-800">
+          <h2 class="text-sm font-semibold mb-4 text-blue-300">Requête Cypher (lecture seule)</h2>
+          <textarea id="cypher-query" rows="3" placeholder="MATCH (n) RETURN n LIMIT 10"
+            class="w-full bg-gray-800 border border-gray-700 rounded-lg px-3 py-2 text-sm font-mono resize-none focus:outline-none focus:border-blue-500"></textarea>
+          <button onclick="runCypher()" class="mt-3 bg-blue-600 hover:bg-blue-700 px-4 py-2 rounded-lg text-sm font-medium">Exécuter</button>
+          <div id="cypher-result" class="mt-3 hidden">
+            <pre id="cypher-output" class="bg-gray-800 rounded-lg p-3 text-xs text-green-300 max-h-64 overflow-auto"></pre>
+          </div>
+        </div>
+
+        <div class="bg-gray-900 rounded-xl p-5 border border-red-900/40">
+          <h2 class="text-sm font-semibold mb-2 text-red-400">Zone dangereuse</h2>
+          <p class="text-xs text-gray-400 mb-3">Supprime tous les nœuds et relations du graphe. Irréversible.</p>
+          <button onclick="clearNeo4j()" class="bg-red-700 hover:bg-red-600 px-4 py-2 rounded-lg text-sm font-medium">Vider Neo4j</button>
+        </div>
+      </div>
+
+      <!-- ═══ EPISODIC ══════════════════════════════════════════════════ -->
+      <div id="tab-episodic" class="tab-content hidden space-y-4">
+        <div id="episodic-stats" class="grid grid-cols-2 gap-4">
+          <div class="col-span-2 text-sm text-gray-400"><span class="spinner"></span> Chargement...</div>
+        </div>
+
+        <div class="bg-gray-900 rounded-xl border border-gray-800">
+          <div class="p-4 border-b border-gray-800 flex items-center justify-between">
+            <h2 class="text-sm font-semibold text-blue-300">Épisodes récents (PostgreSQL)</h2>
+          </div>
+          <div id="episodic-recent" class="p-4 text-sm text-gray-400"><span class="spinner"></span> Chargement...</div>
+        </div>
+
+        <div class="bg-gray-900 rounded-xl p-5 border border-red-900/40">
+          <h2 class="text-sm font-semibold mb-2 text-red-400">Vider le cache Redis</h2>
+          <p class="text-xs text-gray-400 mb-3">Supprime les épisodes en mémoire courte durée (24h). Les données PostgreSQL restent intactes.</p>
+          <button onclick="flushRedis()" class="bg-red-700 hover:bg-red-600 px-4 py-2 rounded-lg text-sm font-medium">Vider Redis</button>
+          <span id="flush-status" class="ml-3 text-xs text-gray-400"></span>
+        </div>
+      </div>
+
+      <!-- ═══ HAYSTACK ══════════════════════════════════════════════════ -->
+      <div id="tab-haystack" class="tab-content hidden space-y-4">
+        <div id="haystack-status-card" class="bg-gray-900 rounded-xl p-5 border border-gray-800 text-sm text-gray-400">
+          <span class="spinner"></span> Chargement...
+        </div>
+        <div class="bg-gray-900 rounded-xl p-5 border border-gray-800">
+          <h2 class="text-sm font-semibold mb-4 text-blue-300">Indexer un document dans Haystack</h2>
+          <input id="hs-title" type="text" placeholder="Titre"
+            class="w-full bg-gray-800 border border-gray-700 rounded-lg px-3 py-2 text-sm mb-3 focus:outline-none focus:border-blue-500">
+          <textarea id="hs-content" rows="5" placeholder="Contenu du document..."
+            class="w-full bg-gray-800 border border-gray-700 rounded-lg px-3 py-2 text-sm resize-none focus:outline-none focus:border-blue-500"></textarea>
+          <button onclick="haystackIndex()" class="mt-3 bg-green-700 hover:bg-green-600 px-4 py-2 rounded-lg text-sm font-medium">Indexer</button>
+          <div id="hs-result" class="mt-2 text-xs text-gray-400"></div>
+        </div>
+      </div>
+
+      <!-- ═══ RAY ════════════════════════════════════════════════════════ -->
+      <div id="tab-ray" class="tab-content hidden space-y-4">
+        <div id="ray-status-card" class="bg-gray-900 rounded-xl p-5 border border-gray-800 text-sm text-gray-400">
+          <span class="spinner"></span> Chargement...
+        </div>
+        <div class="bg-gray-900 rounded-xl p-5 border border-gray-800 text-sm">
+          <h2 class="text-sm font-semibold mb-3 text-blue-300">Commandes rapides</h2>
+          <div class="space-y-2 text-gray-400 font-mono text-xs bg-gray-800 rounded-lg p-4">
+            <div><span class="text-green-400">$</span> make ray-up     <span class="text-gray-500"># Démarrer le cluster</span></div>
+            <div><span class="text-green-400">$</span> make ray-down   <span class="text-gray-500"># Arrêter le cluster</span></div>
+            <div><span class="text-green-400">$</span> USE_RAY=true docker compose up -d cognitive-core</div>
+          </div>
+          <a href="http://localhost:8265" target="_blank"
+            class="mt-4 inline-block bg-yellow-600 hover:bg-yellow-500 px-4 py-2 rounded-lg text-sm font-medium text-white">
+            Ouvrir Ray Dashboard ↗
+          </a>
+        </div>
+      </div>
+
+    </div><!-- /p-6 -->
+  </main>
+
+<script>
+// ── Utilitaires ─────────────────────────────────────────────────────────────
+const $ = (id) => document.getElementById(id);
+
+const api = async (path, method = 'GET', body = null) => {
+  const opts = { method, headers: { 'Content-Type': 'application/json' } };
+  if (body) opts.body = JSON.stringify(body);
+  const r = await fetch(path, opts);
+  if (!r.ok) {
+    const err = await r.text();
+    throw new Error(err || `HTTP ${r.status}`);
+  }
+  return r.json();
+};
+
+const badge = (status) => {
+  const colors = { up: 'status-up', down: 'status-down', optionnel: 'status-opt', unavailable: 'status-opt' };
+  const cls = colors[status] || 'status-opt';
+  return `<span class="${cls} text-white text-xs px-2 py-0.5 rounded-full">${status}</span>`;
+};
+
+const card = (title, content, extra = '') =>
+  `<div class="bg-gray-900 rounded-xl p-4 border border-gray-800 ${extra}">${title}${content}</div>`;
+
+const toast = (msg, ok = true) => {
+  const t = document.createElement('div');
+  t.className = `fixed bottom-4 right-4 px-4 py-2 rounded-lg text-sm font-medium z-50 ${ok ? 'bg-green-700' : 'bg-red-700'}`;
+  t.textContent = msg;
+  document.body.appendChild(t);
+  setTimeout(() => t.remove(), 3000);
+};
+
+// ── Navigation ───────────────────────────────────────────────────────────────
+let currentTab = 'dashboard';
+
+const tabTitles = {
+  dashboard: '📊 Dashboard', 'test-rag': '🧪 Test RAG', indexer: '📥 Indexer un document',
+  ollama: '🦙 Ollama — Modèles', qdrant: '🔮 Qdrant — Collections',
+  neo4j: '🕸️ Neo4j — Graphe de connaissances', episodic: '🧠 Mémoire épisodique',
+  haystack: '📄 Haystack — Documents', ray: '⚡ Ray — Cluster distribué',
+};
+
+const tabLoaders = {
+  dashboard: loadDashboard, ollama: loadOllama, qdrant: loadQdrant,
+  neo4j: loadNeo4j, episodic: loadEpisodic, haystack: loadHaystack, ray: loadRay,
+};
+
+function showTab(name) {
+  document.querySelectorAll('.tab-content').forEach(el => el.classList.add('hidden'));
+  document.querySelectorAll('.tab-btn').forEach(el => el.classList.remove('active'));
+  $(`tab-${name}`).classList.remove('hidden');
+  document.querySelector(`[data-tab="${name}"]`).classList.add('active');
+  $('page-title').textContent = tabTitles[name] || name;
+  currentTab = name;
+  tabLoaders[name]?.();
+}
+
+function refreshCurrent() { tabLoaders[currentTab]?.(); }
+
+// ── Dashboard ────────────────────────────────────────────────────────────────
+async function loadDashboard() {
+  $('health-grid').innerHTML = '<div class="col-span-3 text-sm text-gray-400"><span class="spinner"></span> Vérification des services...</div>';
+  try {
+    const h = await api('/api/health');
+    const icons = {
+      ollama: '🦙', qdrant: '🔮', haystack: '📄', 'cognitive-core': '🧠',
+      ray: '⚡', neo4j: '🕸️', redis: '⚡', postgres: '🗄️',
+    };
+    $('health-grid').innerHTML = Object.entries(h).map(([svc, info]) =>
+      `<div class="bg-gray-900 border border-gray-800 rounded-xl p-4">
+        <div class="flex items-center justify-between mb-1">
+          <span class="text-sm font-medium">${icons[svc] || '⚙️'} ${svc}</span>
+          ${badge(info.status)}
+        </div>
+        ${info.error ? `<div class="text-xs text-gray-500 mt-1 truncate" title="${info.error}">${info.error}</div>` : ''}
+      </div>`
+    ).join('');
+  } catch(e) {
+    $('health-grid').innerHTML = `<div class="col-span-3 text-sm text-red-400">Erreur : ${e.message}</div>`;
+  }
+}
+
+// ── Test RAG ─────────────────────────────────────────────────────────────────
+async function testRag() {
+  const query = $('rag-query').value.trim();
+  if (!query) return;
+  $('rag-loading').classList.remove('hidden');
+  $('rag-result').classList.add('hidden');
+  try {
+    const t0 = Date.now();
+    const r = await api('/api/cognitive/query', 'POST', { query });
+    const ms = Date.now() - t0;
+    $('rag-answer').textContent = r.final_answer || JSON.stringify(r, null, 2);
+    $('rag-meta').textContent = `Durée : ${ms}ms — Session : ${r.session_id || '—'}`;
+    $('rag-result').classList.remove('hidden');
+  } catch(e) {
+    $('rag-answer').textContent = `Erreur : ${e.message}`;
+    $('rag-meta').textContent = '';
+    $('rag-result').classList.remove('hidden');
+  } finally {
+    $('rag-loading').classList.add('hidden');
+  }
+}
+
+// ── Indexer ──────────────────────────────────────────────────────────────────
+async function indexDoc() {
+  const content = $('idx-content').value.trim();
+  if (!content) return;
+  $('idx-result').classList.add('hidden');
+  try {
+    const r = await api('/api/cognitive/index', 'POST', {
+      content,
+      rag_type: $('idx-type').value,
+    });
+    $('idx-result').innerHTML = `<span class="text-green-400">✓ Indexé avec succès</span> — ${JSON.stringify(r)}`;
+    $('idx-result').classList.remove('hidden');
+    $('idx-content').value = '';
+    $('idx-title').value = '';
+  } catch(e) {
+    $('idx-result').innerHTML = `<span class="text-red-400">Erreur : ${e.message}</span>`;
+    $('idx-result').classList.remove('hidden');
+  }
+}
+
+// ── Ollama ───────────────────────────────────────────────────────────────────
+async function loadOllama() {
+  $('ollama-list').innerHTML = '<span class="spinner"></span> Chargement...';
+  try {
+    const models = await api('/api/ollama/models');
+    if (!models.length) {
+      $('ollama-list').innerHTML = '<p class="text-gray-500">Aucun modèle installé.</p>';
+      return;
+    }
+    $('ollama-list').innerHTML = `
+      <table class="w-full text-sm">
+        <thead><tr class="text-xs text-gray-500 border-b border-gray-800">
+          <th class="text-left py-2">Modèle</th><th class="text-right py-2">Taille</th><th class="text-right py-2">Action</th>
+        </tr></thead>
+        <tbody>
+          ${models.map(m => `
+            <tr class="border-b border-gray-800/50">
+              <td class="py-2 font-mono text-gray-200">${m.name}</td>
+              <td class="py-2 text-right text-gray-400">${m.size_gb} Go</td>
+              <td class="py-2 text-right">
+                <button onclick="deleteModel('${m.name}')" class="text-xs text-red-400 hover:text-red-300">Supprimer</button>
+              </td>
+            </tr>`).join('')}
+        </tbody>
+      </table>`;
+  } catch(e) {
+    $('ollama-list').innerHTML = `<p class="text-red-400">Erreur : ${e.message}</p>`;
+  }
+}
+
+async function pullModel() {
+  const model = $('pull-model').value.trim();
+  if (!model) return;
+  $('pull-status').innerHTML = '<span class="spinner"></span> Téléchargement en cours (peut prendre plusieurs minutes)...';
+  try {
+    await api('/api/ollama/pull', 'POST', { model });
+    $('pull-status').textContent = `✓ ${model} téléchargé`;
+    $('pull-model').value = '';
+    loadOllama();
+  } catch(e) {
+    $('pull-status').textContent = `Erreur : ${e.message}`;
+  }
+}
+
+async function deleteModel(name) {
+  if (!confirm(`Supprimer le modèle "${name}" ?`)) return;
+  try {
+    await api(`/api/ollama/models/${encodeURIComponent(name)}`, 'DELETE');
+    toast(`${name} supprimé`);
+    loadOllama();
+  } catch(e) {
+    toast(`Erreur : ${e.message}`, false);
+  }
+}
+
+// ── Qdrant ───────────────────────────────────────────────────────────────────
+async function loadQdrant() {
+  $('qdrant-list').innerHTML = '<span class="spinner"></span> Chargement...';
+  try {
+    const cols = await api('/api/qdrant/collections');
+    if (!cols.length) {
+      $('qdrant-list').innerHTML = '<p class="text-gray-500">Aucune collection.</p>';
+      return;
+    }
+    $('qdrant-list').innerHTML = `
+      <table class="w-full text-sm">
+        <thead><tr class="text-xs text-gray-500 border-b border-gray-800">
+          <th class="text-left py-2">Collection</th><th class="text-right py-2">Vecteurs</th><th class="text-right py-2">Action</th>
+        </tr></thead>
+        <tbody>
+          ${cols.map(c => `
+            <tr class="border-b border-gray-800/50">
+              <td class="py-2 font-mono text-gray-200">${c.name}</td>
+              <td class="py-2 text-right text-gray-400">${c.vectors_count.toLocaleString()}</td>
+              <td class="py-2 text-right">
+                <button onclick="deleteCollection('${c.name}')" class="text-xs text-red-400 hover:text-red-300">Supprimer</button>
+              </td>
+            </tr>`).join('')}
+        </tbody>
+      </table>`;
+  } catch(e) {
+    $('qdrant-list').innerHTML = `<p class="text-red-400">Erreur : ${e.message}</p>`;
+  }
+}
+
+async function deleteCollection(name) {
+  if (!confirm(`Supprimer la collection "${name}" et tous ses vecteurs ?`)) return;
+  try {
+    await api(`/api/qdrant/collections/${encodeURIComponent(name)}`, 'DELETE');
+    toast(`Collection ${name} supprimée`);
+    loadQdrant();
+  } catch(e) {
+    toast(`Erreur : ${e.message}`, false);
+  }
+}
+
+// ── Neo4j ────────────────────────────────────────────────────────────────────
+async function loadNeo4j() {
+  $('neo4j-stats').innerHTML = '<div class="col-span-3 text-sm text-gray-400"><span class="spinner"></span> Chargement...</div>';
+  try {
+    const s = await api('/api/neo4j/stats');
+    $('neo4j-stats').innerHTML = `
+      ${card('<div class="text-2xl font-bold text-blue-400">' + s.nodes + '</div><div class="text-xs text-gray-400 mt-1">Nœuds</div>', '')}
+      ${card('<div class="text-2xl font-bold text-purple-400">' + s.relations + '</div><div class="text-xs text-gray-400 mt-1">Relations</div>', '')}
+      ${card('<div class="text-xs text-gray-400 mb-1">Labels</div><div class="flex flex-wrap gap-1">' +
+        (s.labels.map(l => `<span class="bg-gray-700 text-gray-300 text-xs px-2 py-0.5 rounded">${l}</span>`).join('') || '<span class="text-gray-500">—</span>') + '</div>', '')}`;
+  } catch(e) {
+    $('neo4j-stats').innerHTML = `<div class="col-span-3 text-sm text-red-400">Erreur : ${e.message}</div>`;
+  }
+}
+
+async function runCypher() {
+  const query = $('cypher-query').value.trim();
+  if (!query) return;
+  $('cypher-result').classList.add('hidden');
+  try {
+    const r = await api('/api/neo4j/query', 'POST', { query });
+    $('cypher-output').textContent = JSON.stringify(r.records, null, 2);
+    $('cypher-result').classList.remove('hidden');
+  } catch(e) {
+    $('cypher-output').textContent = `Erreur : ${e.message}`;
+    $('cypher-result').classList.remove('hidden');
+  }
+}
+
+async function clearNeo4j() {
+  if (!confirm('Supprimer TOUS les nœuds et relations Neo4j ? Cette action est irréversible.')) return;
+  try {
+    const r = await api('/api/neo4j/clear', 'DELETE');
+    toast(r.message);
+    loadNeo4j();
+  } catch(e) {
+    toast(`Erreur : ${e.message}`, false);
+  }
+}
+
+// ── Épisodique ───────────────────────────────────────────────────────────────
+async function loadEpisodic() {
+  $('episodic-stats').innerHTML = '<div class="col-span-2 text-sm text-gray-400"><span class="spinner"></span> Chargement...</div>';
+  $('episodic-recent').innerHTML = '<span class="spinner"></span> Chargement...';
+  try {
+    const [stats, recent] = await Promise.all([
+      api('/api/episodic/stats'),
+      api('/api/episodic/recent'),
+    ]);
+    const redis = stats.redis || {};
+    const pg    = stats.postgres || {};
+    $('episodic-stats').innerHTML = `
+      ${card('<div class="text-xs text-gray-400 mb-1">Redis (court terme)</div>' +
+        (redis.error ? `<p class="text-red-400 text-xs">${redis.error}</p>` :
+        `<div class="text-2xl font-bold text-yellow-400">${redis.episodes}</div>
+         <div class="text-xs text-gray-400 mt-1">épisodes — ${redis.memory}</div>`), '')}
+      ${card('<div class="text-xs text-gray-400 mb-1">PostgreSQL (long terme)</div>' +
+        (pg.error ? `<p class="text-red-400 text-xs">${pg.error}</p>` :
+        `<div class="text-2xl font-bold text-blue-400">${pg.episodes}</div>
+         <div class="text-xs text-gray-400 mt-1">${pg.sessions} sessions</div>`), '')}`;
+
+    if (!recent.length) {
+      $('episodic-recent').innerHTML = '<p class="text-gray-500 text-sm">Aucun épisode enregistré.</p>';
+    } else {
+      $('episodic-recent').innerHTML = recent.map(ep => `
+        <div class="border-b border-gray-800 py-3">
+          <div class="text-xs text-gray-500">${ep.timestamp} — session ${ep.session_id || '—'}</div>
+          <div class="text-sm text-gray-200 mt-1 font-medium">${ep.query}</div>
+          <div class="text-xs text-gray-400 mt-1 line-clamp-2">${ep.answer?.substring(0, 200)}${ep.answer?.length > 200 ? '…' : ''}</div>
+        </div>`).join('');
+    }
+  } catch(e) {
+    $('episodic-stats').innerHTML = `<div class="col-span-2 text-sm text-red-400">Erreur : ${e.message}</div>`;
+  }
+}
+
+async function flushRedis() {
+  if (!confirm('Vider tous les épisodes Redis (mémoire court terme) ?')) return;
+  try {
+    const r = await api('/api/episodic/flush-redis', 'DELETE');
+    $('flush-status').textContent = `✓ ${r.deleted} épisodes supprimés`;
+    loadEpisodic();
+  } catch(e) {
+    $('flush-status').textContent = `Erreur : ${e.message}`;
+  }
+}
+
+// ── Haystack ─────────────────────────────────────────────────────────────────
+async function loadHaystack() {
+  $('haystack-status-card').innerHTML = '<span class="spinner"></span> Chargement...';
+  try {
+    const s = await api('/api/haystack/status');
+    const ok = s.ok;
+    $('haystack-status-card').innerHTML = `
+      <div class="flex items-center gap-3">
+        <span class="text-sm font-medium">Service Haystack</span>
+        ${badge(ok ? 'up' : 'down')}
+      </div>
+      ${s.data ? `<div class="text-xs text-gray-400 mt-2">${JSON.stringify(s.data)}</div>` : ''}`;
+  } catch(e) {
+    $('haystack-status-card').innerHTML = `<p class="text-red-400 text-sm">Erreur : ${e.message}</p>`;
+  }
+}
+
+async function haystackIndex() {
+  const content = $('hs-content').value.trim();
+  if (!content) return;
+  $('hs-result').textContent = '';
+  try {
+    await api('/api/haystack/index', 'POST', { content, title: $('hs-title').value });
+    $('hs-result').textContent = '✓ Document indexé dans Haystack';
+    $('hs-content').value = '';
+    $('hs-title').value = '';
+  } catch(e) {
+    $('hs-result').textContent = `Erreur : ${e.message}`;
+  }
+}
+
+// ── Ray ──────────────────────────────────────────────────────────────────────
+async function loadRay() {
+  $('ray-status-card').innerHTML = '<span class="spinner"></span> Chargement...';
+  try {
+    const s = await api('/api/ray/status');
+    if (s.error || s.status === 'unavailable') {
+      $('ray-status-card').innerHTML = `
+        <div class="flex items-center gap-3 mb-2">
+          <span class="text-sm font-medium">Ray Cluster</span>
+          ${badge('optionnel')}
+        </div>
+        <p class="text-xs text-gray-400">${s.note || s.error || 'Cluster non démarré'}</p>`;
+    } else {
+      $('ray-status-card').innerHTML = `
+        <div class="flex items-center gap-3 mb-3">
+          <span class="text-sm font-medium">Ray Cluster</span>
+          ${badge('up')}
+        </div>
+        <pre class="text-xs text-gray-300 bg-gray-800 rounded-lg p-3 max-h-48 overflow-auto">${JSON.stringify(s, null, 2)}</pre>`;
+    }
+  } catch(e) {
+    $('ray-status-card').innerHTML = `<p class="text-red-400 text-sm">Erreur : ${e.message}</p>`;
+  }
+}
+
+// ── Init ─────────────────────────────────────────────────────────────────────
+loadDashboard();
+</script>
+</body>
+</html>
