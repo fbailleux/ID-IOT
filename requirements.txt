@@ -38,6 +38,9 @@ alembic==1.14.0
 sentence-transformers==3.3.0
 huggingface-hub==0.26.2
 
+# Ray — Orchestration distribuée
+ray[default]>=2.9.0,<3.0.0
+
 # Utilitaires
 httpx==0.27.2
 tenacity==9.0.0

@@ -18,6 +18,7 @@ volumes:
   postgres_data:
   open_webui_data:
   haystack_data:
+  ray_tmp:
 
 services:
 
@@ -187,6 +188,9 @@ services:
       - DEFAULT_MODEL=${DEFAULT_MODEL:-mistral}
       - FAST_MODEL=${FAST_MODEL:-phi3:mini}
       - LOG_LEVEL=${LOG_LEVEL:-INFO}
+      - USE_RAY=${USE_RAY:-false}
+      - RAY_ADDRESS=${RAY_ADDRESS:-}
+      - RAY_NUM_CPUS=${RAY_NUM_CPUS:-4}
     depends_on:
       - ollama
       - qdrant
@@ -199,6 +203,34 @@ services:
       resources:
         limits:
           memory: 4G
+
+  # ─────────────────────────────────────────────
+  # Ray — Orchestration distribuée (optionnel)
+  # Activer avec : docker compose --profile ray up
+  # Dashboard : http://localhost:8265
+  # ─────────────────────────────────────────────
+  ray-head:
+    image: rayproject/ray:2.40.0-py311
+    container_name: ray-head
+    profiles: [ray]
+    command: >
+      ray start --head
+      --port=6380
+      --dashboard-host=0.0.0.0
+      --dashboard-port=8265
+      --ray-client-server-port=10001
+      --block
+    ports:
+      - "8265:8265"   # Ray Dashboard
+      - "10001:10001" # Ray client (cognitive-core)
+    volumes:
+      - ray_tmp:/tmp/ray
+    networks:
+      - cognitive-net
+    deploy:
+      resources:
+        limits:
+          memory: 2G
 
   # ─────────────────────────────────────────────
   # Frontend — Open WebUI

@@ -2,7 +2,8 @@
 # Multi-RAG Cognitive System — Makefile
 # ─────────────────────────────────────────────
 
-.PHONY: help up down build logs init models status clean
+.PHONY: help up down build logs init models status clean \
+        ray-up ray-down ray-dashboard ray-status
 
 help: ## Affiche cette aide
 	@grep -E '^[a-zA-Z_-]+:.*?## .*$$' $(MAKEFILE_LIST) | \
@@ -56,6 +57,27 @@ status: ## État des services
 	@echo ""
 	@echo "=== Qdrant ==="
 	@curl -sf http://localhost:6333/health | python3 -m json.tool 2>/dev/null || echo "Qdrant non disponible"
+
+# ── Ray — Orchestration distribuée ─────────────────────────────────────────
+
+ray-up: ## Démarre le cluster Ray (dashboard sur :8265) + active USE_RAY
+	docker compose --profile ray up -d ray-head
+	@echo ""
+	@echo "Ray head démarré. Dashboard : http://localhost:8265"
+	@echo "Pour activer Ray dans cognitive-core :"
+	@echo "  USE_RAY=true RAY_ADDRESS=ray://ray-head:10001 docker compose up -d cognitive-core"
+
+ray-down: ## Arrête le cluster Ray
+	docker compose --profile ray stop ray-head
+	docker compose --profile ray rm -f ray-head
+
+ray-dashboard: ## Affiche l'URL du dashboard Ray
+	@echo "Ray Dashboard : http://localhost:8265"
+	@curl -sf http://localhost:8265/ > /dev/null 2>&1 && echo "Statut : actif" || echo "Statut : non disponible (lancez make ray-up)"
+
+ray-status: ## État du cluster Ray
+	@echo "=== Ray Cluster ==="
+	@curl -sf http://localhost:8265/api/cluster_status | python3 -m json.tool 2>/dev/null || echo "Ray non disponible"
 
 # ── Nettoyage ──────────────────────────────────────────────────────────────
 

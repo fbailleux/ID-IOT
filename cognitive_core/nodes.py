@@ -4,6 +4,7 @@ Chaque nœud reçoit et retourne un CognitiveState partiel.
 """
 from __future__ import annotations
 
+import asyncio
 import logging
 import uuid
 from typing import Any
@@ -155,6 +156,53 @@ async def episodic_store_node(state: CognitiveState) -> dict[str, Any]:
     )
     logger.info("[EpisodicStore] Épisode sauvegardé")
     return {}
+
+
+# ── Nœud : RAG Parallèle via Ray ───────────────────────────────────────────
+async def ray_parallel_rag_node(state: CognitiveState) -> dict[str, Any]:
+    """
+    Lance les 4 backends RAG en parallèle via Ray.
+
+    En mode local (sans cluster), Ray utilise plusieurs processus sur la
+    même machine. Avec RAY_ADDRESS défini, les tâches sont distribuées
+    sur le cluster.
+    """
+    import ray
+    from ray_orchestrator.cluster import init_ray
+    from ray_orchestrator.remote_tasks import (
+        document_rag_search,
+        episodic_rag_search,
+        graph_rag_search,
+        vector_rag_search,
+    )
+
+    init_ray()
+    query = state["query"]
+
+    # Soumission simultanée des 4 tâches Ray (non-bloquant)
+    refs = [
+        vector_rag_search.remote(query, k=5),
+        graph_rag_search.remote(query, depth=2),
+        document_rag_search.remote(query, top_k=5),
+        episodic_rag_search.remote(query, limit=3),
+    ]
+
+    # ray.get() est bloquant → exécuté dans un thread pour ne pas bloquer l'event loop
+    loop = asyncio.get_event_loop()
+    vector, graph, document, episodic = await loop.run_in_executor(
+        None, ray.get, refs
+    )
+
+    logger.info(
+        f"[RayParallelRAG] V:{len(vector)} G:{len(graph)} "
+        f"D:{len(document)} E:{len(episodic)}"
+    )
+    return {
+        "vector_results": vector,
+        "graph_results": graph,
+        "document_results": document,
+        "episodic_results": episodic,
+    }
 
 
 # ── Helpers ────────────────────────────────────────────────────────────────
