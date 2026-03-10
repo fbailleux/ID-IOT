@@ -142,7 +142,8 @@ USE_RAY=true RAY_ADDRESS=ray://ray-head:10001 docker compose up -d cognitive-cor
 | Haystack + Cognitive Core | 4 Go |
 | Agents CrewAI | 4 Go |
 | Redis + PostgreSQL | 2 Go |
-| **Total (sans Ray)** | **~36–40 Go** |
+| Admin UI | 1 Go |
+| **Total (sans Ray)** | **~37–41 Go** |
 | Ray head (optionnel) | +2 Go |
 
 ## Ports exposés
@@ -185,7 +186,9 @@ ID-IOT/
 ├── docker-compose.yml          # Orchestration des services
 ├── .env.example                # Variables d'environnement
 ├── Makefile                    # Commandes simplifiées
-├── requirements.txt            # Dependances Cognitive Core
+├── requirements.txt            # Dépendances Cognitive Core
+├── requirements-admin.txt      # Dépendances Admin Service
+├── requirements-haystack.txt   # Dépendances Haystack Service
 ├── cognitive_core/             # LangGraph + noeuds du graphe
 │   ├── graph.py               # Graphe LangGraph principal
 │   ├── nodes.py               # Noeuds (planner, rag, synthesis...)
@@ -222,13 +225,65 @@ ID-IOT/
 │   └── pull_models.sh          # Telechargement modeles
 └── docker/
     ├── Dockerfile.cognitive
-    └── Dockerfile.haystack
+    ├── Dockerfile.haystack
+    └── Dockerfile.admin
 ```
 
-## Variables d'environnement (Ray)
+## API Admin Service
+
+```bash
+# Santé de tous les services
+curl http://localhost:8080/api/health
+
+# Lister les modèles Ollama
+curl http://localhost:8080/api/ollama/models
+
+# Télécharger un modèle
+curl -X POST http://localhost:8080/api/ollama/pull \
+  -H "Content-Type: application/json" \
+  -d '{"model": "mistral"}'
+
+# Statistiques Neo4j
+curl http://localhost:8080/api/neo4j/stats
+
+# Requête Cypher (lecture)
+curl -X POST http://localhost:8080/api/neo4j/query \
+  -H "Content-Type: application/json" \
+  -d '{"query": "MATCH (n) RETURN n LIMIT 10"}'
+
+# Statistiques mémoire épisodique
+curl http://localhost:8080/api/episodic/stats
+
+# Épisodes récents
+curl http://localhost:8080/api/episodic/recent
+
+# Vider le cache Redis
+curl -X DELETE http://localhost:8080/api/episodic/flush-redis
+
+# État du cluster Ray
+curl http://localhost:8080/api/ray/status
+
+# Test d'une requête cognitive
+curl -X POST http://localhost:8080/api/cognitive/query \
+  -H "Content-Type: application/json" \
+  -d '{"query": "Quel est l état du système ?"}'
+```
+
+## Variables d'environnement
+
+### Ray
 
 | Variable | Défaut | Description |
 |----------|--------|-------------|
 | `USE_RAY` | `false` | Active le mode Ray pour les 4 RAG parallèles |
 | `RAY_ADDRESS` | _(vide)_ | Adresse du cluster Ray (`ray://ray-head:10001`) |
 | `RAY_NUM_CPUS` | `4` | CPUs alloués en mode local |
+
+### LLM et services
+
+| Variable | Défaut | Description |
+|----------|--------|-------------|
+| `DEFAULT_MODEL` | `mistral` | Modèle principal pour la synthèse |
+| `FAST_MODEL` | `phi3:mini` | Modèle rapide pour le planificateur |
+| `LOG_LEVEL` | `INFO` | Niveau de logs (`DEBUG`, `INFO`, `WARNING`) |
+| `WEBUI_SECRET_KEY` | _(à changer)_ | Clé secrète Open WebUI |
