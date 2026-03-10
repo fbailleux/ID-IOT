@@ -16,20 +16,27 @@ LangGraph Cognitive Core (port 8000)
     ▼
 Planner Agent
     │
- ┌──────────────────────────────────────┐
- ▼                                      ▼
-Agent Swarm (CrewAI)           Cognitive Services
-                                        │
-           ┌──────────────┬─────────────┬─────────────┐
-           ▼              ▼             ▼             ▼
-      Vector RAG     Graph RAG    Document RAG  Episodic RAG
-           │              │             │             │
-           ▼              ▼             ▼             ▼
-        Qdrant          Neo4j        Haystack     Redis + PG
-                                        │
-                                        ▼
-                                   LLM Runtime
-                                     Ollama
+    ▼
+┌─────────────────────────────────────────────────────────┐
+│  Couche RAG parallèle                                   │
+│                                                         │
+│  Mode standard (USE_RAY=false)  Mode Ray (USE_RAY=true) │
+│  ┌──────────────────────────┐   ┌──────────────────────┐│
+│  │ fan-out LangGraph natif  │   │ Ray Orchestrator     ││
+│  │ (4 nœuds async)          │   │ (workers distribués) ││
+│  └──────────────────────────┘   └──────────────────────┘│
+└─────────────────────────────────────────────────────────┘
+    │
+    ├── Vector RAG   → Qdrant
+    ├── Graph RAG    → Neo4j
+    ├── Document RAG → Haystack
+    └── Episodic RAG → Redis + PostgreSQL
+    │
+    ▼
+Agent Swarm (CrewAI) → Synthesis → Mémoire épisodique
+    │
+    ▼
+LLM Runtime (Ollama) — Mistral 7B / Phi-3 Mini
 ```
 
 ## Les 4 systèmes RAG
@@ -84,12 +91,28 @@ open http://localhost:3000
 ### Commandes utiles
 
 ```bash
-make up        # Démarrer
+make up        # Démarrer tous les services
 make down      # Arrêter
 make status    # État des services
 make logs      # Logs en temps réel
 make models    # Télécharger les modèles Ollama
 make init      # Initialiser les BDD
+```
+
+#### Ray (orchestration distribuée)
+
+```bash
+make ray-up        # Démarrer le cluster Ray (dashboard http://localhost:8265)
+make ray-down      # Arrêter le cluster Ray
+make ray-status    # État du cluster Ray
+make ray-dashboard # Vérifier le dashboard Ray
+
+# Activer Ray dans cognitive-core (mode local — pas de cluster requis)
+USE_RAY=true docker compose up -d cognitive-core
+
+# Activer Ray avec cluster distribué
+make ray-up
+USE_RAY=true RAY_ADDRESS=ray://ray-head:10001 docker compose up -d cognitive-core
 ```
 
 ## RAM utilisée (serveur)
@@ -102,7 +125,8 @@ make init      # Initialiser les BDD
 | Haystack + Cognitive Core | 4 Go |
 | Agents CrewAI | 4 Go |
 | Redis + PostgreSQL | 2 Go |
-| **Total** | **~36–40 Go** |
+| **Total (sans Ray)** | **~36–40 Go** |
+| Ray head (optionnel) | +2 Go |
 
 ## Ports exposés
 
@@ -116,6 +140,8 @@ make init      # Initialiser les BDD
 | Neo4j HTTP | 7474 |
 | Redis | 6379 |
 | PostgreSQL | 5432 |
+| Ray Dashboard (optionnel) | 8265 |
+| Ray Client (optionnel) | 10001 |
 
 ## API Cognitive Core
 
@@ -165,6 +191,10 @@ ID-IOT/
 │   ├── qdrant/config.yaml
 │   ├── neo4j/neo4j.conf
 │   └── haystack/pipeline.yaml
+├── ray_orchestrator/           # Couche Ray distribuée
+│   ├── cluster.py             # Init Ray (local ou cluster distant)
+│   ├── remote_tasks.py        # Tâches @ray.remote pour les 4 RAG
+│   └── __init__.py
 ├── scripts/
 │   ├── init_postgres.sql       # Schema episodique
 │   ├── init_neo4j.py           # Init Graph RAG
@@ -173,3 +203,11 @@ ID-IOT/
     ├── Dockerfile.cognitive
     └── Dockerfile.haystack
 ```
+
+## Variables d'environnement (Ray)
+
+| Variable | Défaut | Description |
+|----------|--------|-------------|
+| `USE_RAY` | `false` | Active le mode Ray pour les 4 RAG parallèles |
+| `RAY_ADDRESS` | _(vide)_ | Adresse du cluster Ray (`ray://ray-head:10001`) |
+| `RAY_NUM_CPUS` | `4` | CPUs alloués en mode local |
