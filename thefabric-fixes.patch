@@ -1,0 +1,1444 @@
+From d576f5b65b2adced6b1a8defb9e0e8157585cf1a Mon Sep 17 00:00:00 2001
+From: Franck <franck.bailleux@gmail.com>
+Date: Fri, 27 Mar 2026 10:29:06 +0000
+Subject: [PATCH] fix: align schemas, add tests, pyproject.toml and env.example
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+- jean_marc.py: align all field names with Jean-Marc Pydantic schema 2.0
+  (observed_steps 0-based, real UUIDs, irritant_kind enums, gap_description,
+  total_irritant_severity, procedure_state enum, TheFabric->Jean-Marc translators)
+- bundlefabric.py: fix TPS key — handle both freshness (real manifests) and
+  freshness_score (TheFabric bundles); same fix for updated_at vs last_updated
+- pyspur.py + engine.py: LLM model configurable via --pyspur-model / PYSPUR_MODEL
+- cli.py: add --pyspur-model, --pyspur-url (live submission), --output defaults
+  to ./artifacts, warns when bundlefabric dir is missing
+- pyproject.toml: package metadata, entry point, zero runtime deps, dev extras
+- .env.example: document KFABRIC_URL, KFABRIC_API_KEY, PYSPUR_URL, PYSPUR_MODEL
+- tests/: 49 tests for session_analysis, jean_marc schema, bundlefabric scoring
+---
+ .env.example                           |  36 +++
+ pyproject.toml                         |  27 ++
+ tests/__init__.py                      |   0
+ tests/test_bundlefabric.py             | 203 +++++++++++++
+ tests/test_jean_marc.py                | 171 +++++++++++
+ tests/test_session_analysis.py         | 194 ++++++++++++
+ thefabric/cli.py                       | 181 ++++++++++--
+ thefabric/engine.py                    |   3 +-
+ thefabric/integrations/bundlefabric.py |   9 +-
+ thefabric/integrations/jean_marc.py    | 391 +++++++++++++++++++++----
+ thefabric/integrations/pyspur.py       |  19 +-
+ 11 files changed, 1143 insertions(+), 91 deletions(-)
+ create mode 100644 .env.example
+ create mode 100644 pyproject.toml
+ create mode 100644 tests/__init__.py
+ create mode 100644 tests/test_bundlefabric.py
+ create mode 100644 tests/test_jean_marc.py
+ create mode 100644 tests/test_session_analysis.py
+
+diff --git a/.env.example b/.env.example
+new file mode 100644
+index 0000000..cdff3de
+--- /dev/null
++++ b/.env.example
+@@ -0,0 +1,36 @@
++# TheFabric — Environment variables
++# Copy this file to .env and fill in the values you need.
++# Only KFABRIC_URL and PYSPUR_URL are required for live integrations.
++# All other integrations work offline by default.
++
++# ── KFabric ───────────────────────────────────────────────────────────────────
++# Base URL of a running KFabric instance (fbailleux2/kfabric).
++# If not set, TheFabric generates the query plan but does not submit it.
++KFABRIC_URL=http://localhost:8000
++
++# KFabric API key (Bearer token), if your KFabric instance requires auth.
++KFABRIC_API_KEY=
++
++# ── PySpur ────────────────────────────────────────────────────────────────────
++# Base URL of a running PySpur instance (https://github.com/PySpur-Dev/pyspur).
++# If not set, TheFabric generates the workflow JSON but does not submit it.
++PYSPUR_URL=http://localhost:6080
++
++# LLM model to use inside PySpur nodes.
++# Format: provider/model-name as used by PySpur's LLM registry.
++# Examples:
++#   openai/chatgpt-4o-latest        (default)
++#   anthropic/claude-sonnet-4-6
++#   ollama/mistral
++PYSPUR_MODEL=openai/chatgpt-4o-latest
++
++# ── BundleFabric ──────────────────────────────────────────────────────────────
++# Path to the BundleFabric bundles directory (fbailleux2/bundlefabric/bundles).
++# Default: ../bundlefabric/bundles relative to the thefabric repo root.
++# Override if you cloned bundlefabric to a different location.
++# BUNDLEFABRIC_DIR=/path/to/bundlefabric/bundles
++
++# ── Hermes Agent ──────────────────────────────────────────────────────────────
++# Hermes has no REST API — TheFabric writes MEMORY.md, USER.md and SKILL.md files
++# to the output/hermes/ directory. Point Hermes to that directory to pick them up.
++# No env var needed; output path is controlled by --output CLI flag.
+diff --git a/pyproject.toml b/pyproject.toml
+new file mode 100644
+index 0000000..0c3fed6
+--- /dev/null
++++ b/pyproject.toml
+@@ -0,0 +1,27 @@
++[build-system]
++requires = ["hatchling"]
++build-backend = "hatchling.build"
++
++[project]
++name = "thefabric"
++version = "0.1.0"
++description = "TheFabric — Orchestrateur de sessions quotidiennes: Jean-Marc + PySpur + Hermes + BundleFabric + KFabric"
++readme = "README.md"
++license = { text = "Apache-2.0" }
++requires-python = ">=3.11"
++# Zero runtime dependencies — uses only the Python standard library.
++# All HTTP calls use urllib.request; YAML is handled via the built-in parser.
++dependencies = []
++
++[project.optional-dependencies]
++dev = ["pytest>=8.0", "pytest-cov>=5.0"]
++
++[project.scripts]
++thefabric = "thefabric.cli:main"
++
++[tool.hatch.build.targets.wheel]
++packages = ["thefabric"]
++
++[tool.pytest.ini_options]
++testpaths = ["tests"]
++addopts = "-v"
+diff --git a/tests/__init__.py b/tests/__init__.py
+new file mode 100644
+index 0000000..e69de29
+diff --git a/tests/test_bundlefabric.py b/tests/test_bundlefabric.py
+new file mode 100644
+index 0000000..e900e9f
+--- /dev/null
++++ b/tests/test_bundlefabric.py
+@@ -0,0 +1,203 @@
++"""Tests for bundlefabric.py — bundle scoring and TPS key compatibility."""
++
++import json
++import tempfile
++from pathlib import Path
++
++import pytest
++from thefabric.integrations.bundlefabric import (
++    _tps_score,
++    _recency_score,
++    _score_bundle,
++    resolve_bundle,
++    _load_manifests,
++    _dump_simple_yaml,
++    _parse_simple_yaml,
++)
++
++
++def _write_manifest(bundle_dir: Path, manifest: dict) -> None:
++    bundle_dir.mkdir(parents=True, exist_ok=True)
++    yaml_text = _dump_simple_yaml(manifest)
++    (bundle_dir / "manifest.yaml").write_text(yaml_text, encoding="utf-8")
++
++
++class TestTpsScore:
++    def test_reads_freshness_key(self):
++        """Real BundleFabric manifests use 'freshness', not 'freshness_score'."""
++        manifest = {"temporal": {"freshness": 0.8, "usage_frequency": 0.6, "ecosystem_alignment": 0.7}}
++        score = _tps_score(manifest)
++        expected = round(0.8 * 0.4 + 0.6 * 0.3 + 0.7 * 0.3, 4)
++        assert score == expected
++
++    def test_reads_freshness_score_key_as_fallback(self):
++        """TheFabric-created bundles may use 'freshness_score'."""
++        manifest = {"temporal": {"freshness_score": 0.85, "usage_frequency": 0.5, "ecosystem_alignment": 0.82}}
++        score = _tps_score(manifest)
++        expected = round(0.85 * 0.4 + 0.5 * 0.3 + 0.82 * 0.3, 4)
++        assert score == expected
++
++    def test_defaults_to_0_5_when_missing(self):
++        score = _tps_score({})
++        expected = round(0.5 * 0.4 + 0.5 * 0.3 + 0.5 * 0.3, 4)
++        assert score == expected
++
++    def test_score_bounded_0_to_1(self):
++        for freshness in (0.0, 0.5, 1.0):
++            manifest = {"temporal": {"freshness": freshness, "usage_frequency": freshness, "ecosystem_alignment": freshness}}
++            score = _tps_score(manifest)
++            assert 0.0 <= score <= 1.0
++
++
++class TestRecencyScore:
++    def test_reads_updated_at_key(self):
++        """Real BundleFabric manifests use 'updated_at' at root level."""
++        manifest = {"updated_at": "2026-03-01", "temporal": {}}
++        score = _recency_score(manifest)
++        assert 0.1 <= score <= 1.0
++
++    def test_reads_last_updated_key(self):
++        """TheFabric-created bundles use temporal.last_updated."""
++        manifest = {"temporal": {"last_updated": "2026-03-01"}}
++        score = _recency_score(manifest)
++        assert 0.1 <= score <= 1.0
++
++    def test_defaults_to_0_5_when_missing(self):
++        assert _recency_score({}) == 0.5
++
++    def test_recent_bundle_scores_near_1(self):
++        from datetime import datetime, timedelta
++        recent = (datetime.utcnow() - timedelta(days=10)).strftime("%Y-%m-%d")
++        manifest = {"temporal": {"last_updated": recent}}
++        score = _recency_score(manifest)
++        assert score > 0.9
++
++
++class TestYamlRoundtrip:
++    def test_simple_scalars(self):
++        data = {"id": "test-bundle", "version": "1.0.0", "active": True, "count": 42}
++        assert _parse_simple_yaml(_dump_simple_yaml(data)) == data
++
++    def test_list_values(self):
++        data = {"keywords": ["crm", "salesforce", "automation"]}
++        parsed = _parse_simple_yaml(_dump_simple_yaml(data))
++        assert parsed["keywords"] == ["crm", "salesforce", "automation"]
++
++    def test_nested_dict(self):
++        data = {"temporal": {"freshness": 0.85, "usage_frequency": 0.5}}
++        yaml_text = _dump_simple_yaml(data)
++        parsed = _parse_simple_yaml(yaml_text)
++        assert parsed["temporal"]["freshness"] == 0.85
++        assert parsed["temporal"]["usage_frequency"] == 0.5
++
++
++class TestBundleScoring:
++    def test_high_overlap_scores_higher(self):
++        analysis_high = {
++            "keywords": ["crm", "salesforce", "automation"],
++            "apps_used": ["Salesforce"],
++            "recommendations": [],
++        }
++        analysis_low = {
++            "keywords": ["finance", "invoice", "erp"],
++            "apps_used": ["SAP"],
++            "recommendations": [],
++        }
++        manifest = {
++            "id": "bundle-crm",
++            "name": "CRM Automation",
++            "keywords": ["crm", "salesforce"],
++            "domains": ["crm"],
++            "capabilities": ["automation"],
++            "temporal": {"freshness": 0.85, "usage_frequency": 0.75, "ecosystem_alignment": 0.88},
++            "updated_at": "2026-03-17",
++        }
++        score_high, _, _, _ = _score_bundle(analysis_high, manifest)
++        score_low, _, _, _ = _score_bundle(analysis_low, manifest)
++        assert score_high > score_low
++
++    def test_matched_keywords_returned(self):
++        analysis = {
++            "keywords": ["crm", "salesforce"],
++            "apps_used": [],
++            "recommendations": [],
++        }
++        manifest = {
++            "id": "bundle-crm",
++            "name": "CRM Expert",
++            "keywords": ["crm", "salesforce", "hubspot"],
++            "domains": [],
++            "capabilities": [],
++            "temporal": {},
++        }
++        _, _, matched, _ = _score_bundle(analysis, manifest)
++        assert "crm" in matched
++        assert "salesforce" in matched
++
++
++class TestResolveBundle:
++    def test_creates_bundle_when_dir_empty(self):
++        from thefabric.models import DailySession
++        session = DailySession.from_dict({
++            "session_id": "test-001",
++            "date": "2026-03-27",
++            "user_profile": "user",
++            "goal": "Test",
++            "process_context": "test-process",
++            "activities": [],
++        })
++        analysis = {
++            "keywords": ["test"],
++            "apps_used": [],
++            "recommendations": [{"title": "Automatiser", "description": "desc", "automation_potential": 0.8}],
++            "irritants": [],
++            "process_context": "test-process",
++        }
++        with tempfile.TemporaryDirectory() as tmpdir:
++            bundles_dir = Path(tmpdir) / "bundles"
++            bundles_dir.mkdir()
++            output_dir = Path(tmpdir) / "output"
++            result = resolve_bundle(session, analysis, bundles_dir, output_dir)
++            assert result["created_bundle_id"] is not None
++            assert result["selected_bundle"]["score"] == 1.0
++
++    def test_finds_existing_bundle_above_threshold(self):
++        from thefabric.models import DailySession
++        session = DailySession.from_dict({
++            "session_id": "test-002",
++            "date": "2026-03-27",
++            "user_profile": "user",
++            "goal": "GTM debugging",
++            "process_context": "gtm-debug",
++            "activities": [],
++        })
++        analysis = {
++            "keywords": ["gtm", "analytics", "debug", "ga4"],
++            "apps_used": ["Chrome DevTools"],
++            "recommendations": [],
++            "irritants": [],
++            "process_context": "gtm-debug",
++        }
++        with tempfile.TemporaryDirectory() as tmpdir:
++            bundles_dir = Path(tmpdir) / "bundles"
++            # Write a matching bundle
++            _write_manifest(
++                bundles_dir / "bundle-gtm-debug",
++                {
++                    "id": "bundle-gtm-debug",
++                    "name": "GTM Analytics Debug Expert",
++                    "keywords": ["gtm", "analytics", "ga4", "debug"],
++                    "domains": ["analytics"],
++                    "capabilities": ["gtm-audit", "ga4-debug"],
++                    "temporal": {
++                        "freshness": 0.85,
++                        "usage_frequency": 0.75,
++                        "ecosystem_alignment": 0.88,
++                        "last_updated": "2026-03-17",
++                    },
++                },
++            )
++            output_dir = Path(tmpdir) / "output"
++            result = resolve_bundle(session, analysis, bundles_dir, output_dir, create_threshold=0.3)
++            assert result["selected_bundle"]["bundle_id"] == "bundle-gtm-debug"
++            assert result["created_bundle_id"] is None
+diff --git a/tests/test_jean_marc.py b/tests/test_jean_marc.py
+new file mode 100644
+index 0000000..eb4e98b
+--- /dev/null
++++ b/tests/test_jean_marc.py
+@@ -0,0 +1,171 @@
++"""Tests for jean_marc.py — Jean-Marc schema compatibility."""
++
++import pytest
++from thefabric.models import DailySession
++from thefabric.session_analysis import analyze_session
++from thefabric.integrations.jean_marc import (
++    build_jean_marc_payload,
++    _to_irritants,
++    _to_observed_steps,
++    _IRRITANT_KIND_MAP,
++)
++
++
++def _make_session_with_activities():
++    return DailySession.from_dict({
++        "session_id": "jean-marc-test-001",
++        "date": "2026-03-27",
++        "user_profile": "back-office",
++        "goal": "Process invoices",
++        "process_context": "finance-invoicing",
++        "declared_procedure": "1. Open SAP\n2. Enter invoice\n3. Submit for approval",
++        "activities": [
++            {
++                "title": "Open SAP",
++                "app": "SAP",
++                "action": "open",
++                "start": "2026-03-27T08:00:00",
++                "end": "2026-03-27T08:05:00",
++                "tags": [],
++                "blockers": [],
++            },
++            {
++                "title": "Enter invoice data",
++                "app": "SAP",
++                "action": "form_fill",
++                "start": "2026-03-27T08:05:00",
++                "end": "2026-03-27T08:25:00",
++                "tags": ["double_entry"],
++                "blockers": ["Must also update Excel sheet manually"],
++                "inputs": ["Supplier email"],
++                "outputs": ["SAP invoice record"],
++            },
++            {
++                "title": "Update tracking sheet",
++                "app": "Excel",
++                "action": "edit",
++                "start": "2026-03-27T08:25:00",
++                "end": "2026-03-27T08:40:00",
++                "tags": ["double"],
++                "inputs": ["SAP invoice record"],
++                "outputs": ["Excel tracking entry"],
++            },
++        ],
++    })
++
++
++class TestBuildJeanMarcPayload:
++    def setup_method(self):
++        self.session = _make_session_with_activities()
++        self.analysis = analyze_session(self.session)
++        self.payload = build_jean_marc_payload(self.session, self.analysis)
++
++    def test_has_required_top_level_keys(self):
++        assert "process_analysis" in self.payload
++        assert "field_observation" in self.payload
++
++    def test_process_analysis_has_uuid_id(self):
++        pa = self.payload["process_analysis"]
++        import uuid
++        # Should be a valid UUID string
++        uuid.UUID(pa["id"])  # raises ValueError if not valid
++
++    def test_schema_version_is_2_0(self):
++        assert self.payload["process_analysis"]["schema_version"] == "2.0"
++        assert self.payload["field_observation"]["schema_version"] == "2.0"
++
++    def test_observed_steps_are_0_based(self):
++        steps = self.payload["process_analysis"]["observed_steps"]
++        assert len(steps) > 0
++        assert steps[0]["order"] == 0   # Jean-Marc is 0-based
++
++    def test_observed_steps_have_jean_marc_fields(self):
++        step = self.payload["process_analysis"]["observed_steps"][0]
++        required = {"order", "action", "application", "duration_seconds", "irritant_kind"}
++        assert required.issubset(step.keys())
++
++    def test_declared_steps_from_declared_procedure(self):
++        steps = self.payload["process_analysis"]["declared_steps"]
++        # 3 lines in declared_procedure
++        assert len(steps) == 3
++        assert steps[0]["is_declared"] is True
++        assert steps[0]["order"] == 0
++
++    def test_irritants_use_jean_marc_enum_values(self):
++        irritants = self.payload["process_analysis"]["irritants"]
++        valid_kinds = set(_IRRITANT_KIND_MAP.values())
++        for irr in irritants:
++            assert irr["kind"] in valid_kinds, (
++                f"Irritant kind '{irr['kind']}' not in Jean-Marc IrritantKind enum"
++            )
++
++    def test_irritants_have_jean_marc_fields(self):
++        irritants = self.payload["process_analysis"]["irritants"]
++        if irritants:
++            irr = irritants[0]
++            required = {"kind", "severity", "description", "estimated_time_loss_seconds"}
++            assert required.issubset(irr.keys())
++
++    def test_artifacts_have_jean_marc_format(self):
++        artifacts = self.payload["process_analysis"]["artifacts"]
++        valid_kinds = {"email", "erp_record", "pdf", "file", "form", "spreadsheet"}
++        for art in artifacts:
++            assert "name" in art
++            assert "kind" in art
++            assert "direction" in art
++            assert art["direction"] in ("input", "output")
++
++    def test_field_observation_has_jean_marc_fields(self):
++        fo = self.payload["field_observation"]
++        required = {
++            "declared_procedure", "real_procedure_summary",
++            "gap_description", "total_irritant_severity", "automatable",
++        }
++        assert required.issubset(fo.keys())
++
++    def test_total_irritant_severity_is_float(self):
++        severity = self.payload["field_observation"]["total_irritant_severity"]
++        assert isinstance(severity, float)
++        assert severity >= 0.0
++
++    def test_automatable_is_bool(self):
++        assert isinstance(self.payload["field_observation"]["automatable"], bool)
++
++    def test_procedure_state_valid_enum_value(self):
++        valid = {"declared", "observed", "validated", "automatable"}
++        state = self.payload["process_analysis"]["procedure_state"]
++        assert state in valid
++
++    def test_gap_description_mentions_divergence(self):
++        gap = self.payload["field_observation"]["gap_description"]
++        assert "Divergence score" in gap
++
++    def test_recommendations_have_rec_type(self):
++        recs = self.payload["process_analysis"]["recommendations"]
++        valid_types = {"automate", "simplify", "eliminate", "delegate"}
++        for rec in recs:
++            assert rec["rec_type"] in valid_types
++
++
++class TestIrritantTranslation:
++    def test_thefabric_context_switch_maps_to_jean_marc(self):
++        irritants = [{"kind": "context_switch", "severity": 0.6, "frequency": 2, "impacted_steps": []}]
++        result = _to_irritants(irritants)
++        assert result[0]["kind"] == "context_switching"
++
++    def test_thefabric_manual_transcription_maps_to_jean_marc(self):
++        irritants = [{"kind": "manual_transcription", "severity": 0.78, "frequency": 1, "impacted_steps": []}]
++        result = _to_irritants(irritants)
++        assert result[0]["kind"] == "manual_entry"
++
++    def test_thefabric_search_maps_to_lookup(self):
++        irritants = [{"kind": "search", "severity": 0.5, "frequency": 3, "impacted_steps": []}]
++        result = _to_irritants(irritants)
++        assert result[0]["kind"] == "lookup"
++
++    def test_estimated_time_loss_scales_with_frequency(self):
++        irritants_freq1 = [{"kind": "double_entry", "severity": 0.8, "frequency": 1, "impacted_steps": []}]
++        irritants_freq3 = [{"kind": "double_entry", "severity": 0.8, "frequency": 3, "impacted_steps": []}]
++        result1 = _to_irritants(irritants_freq1)
++        result3 = _to_irritants(irritants_freq3)
++        assert result3[0]["estimated_time_loss_seconds"] == result1[0]["estimated_time_loss_seconds"] * 3
+diff --git a/tests/test_session_analysis.py b/tests/test_session_analysis.py
+new file mode 100644
+index 0000000..35c578a
+--- /dev/null
++++ b/tests/test_session_analysis.py
+@@ -0,0 +1,194 @@
++"""Tests for session_analysis.py — core analysis engine."""
++
++import pytest
++from thefabric.models import DailySession, SessionActivity
++from thefabric.session_analysis import (
++    analyze_session,
++    _build_irritants,
++    _extract_keywords,
++    _coverage_score,
++    _divergence_score,
++)
++
++
++def _make_session(**kwargs) -> DailySession:
++    defaults = {
++        "session_id": "test-session-001",
++        "date": "2026-03-27",
++        "user_profile": "back-office commercial",
++        "goal": "Process daily client requests",
++        "process_context": "back-office-commercial",
++        "declared_procedure": "1. Check emails\n2. Update CRM\n3. Send responses",
++        "activities": [],
++    }
++    defaults.update(kwargs)
++    return DailySession.from_dict(defaults)
++
++
++def _make_activity(**kwargs) -> dict:
++    defaults = {
++        "title": "Check emails",
++        "app": "Gmail",
++        "action": "read",
++        "start": "2026-03-27T08:55:00",
++        "end": "2026-03-27T09:20:00",
++    }
++    defaults.update(kwargs)
++    return defaults
++
++
++class TestAnalyzeSession:
++    def test_empty_session_runs_without_error(self):
++        session = _make_session()
++        result = analyze_session(session)
++        assert result["process_context"] == "back-office-commercial"
++        assert result["observed_steps"] == []
++        assert result["irritants"] == []
++        assert result["keywords"]  # should have some from goal/process_context
++
++    def test_single_activity_produces_one_step(self):
++        session = _make_session(activities=[_make_activity()])
++        result = analyze_session(session)
++        assert len(result["observed_steps"]) == 1
++        assert result["observed_steps"][0]["app"] == "Gmail"
++        assert result["observed_steps"][0]["position"] == 1
++
++    def test_double_entry_irritant_detected(self):
++        activities = [
++            _make_activity(
++                title="Enter data in CRM",
++                app="Salesforce",
++                details="copy-paste from email",
++                tags=["double_entry"],
++            ),
++            _make_activity(
++                title="Enter same data in spreadsheet",
++                app="Google Sheets",
++                tags=["double"],
++            ),
++        ]
++        session = _make_session(activities=activities)
++        result = analyze_session(session)
++        kinds = {irr["kind"] for irr in result["irritants"]}
++        assert "double_entry" in kinds
++
++    def test_context_switch_irritant_detected(self):
++        activities = [
++            _make_activity(app="Gmail", tags=["switch"]),
++            _make_activity(app="Salesforce", tags=["switch"]),
++            _make_activity(app="Google Sheets", tags=["switch"]),
++        ]
++        session = _make_session(activities=activities)
++        result = analyze_session(session)
++        kinds = {irr["kind"] for irr in result["irritants"]}
++        assert "context_switch" in kinds
++
++    def test_apps_used_sorted(self):
++        activities = [
++            _make_activity(app="Salesforce"),
++            _make_activity(app="Gmail"),
++            _make_activity(app="Gmail"),
++        ]
++        session = _make_session(activities=activities)
++        result = analyze_session(session)
++        assert sorted(result["apps_used"]) == result["apps_used"]
++
++    def test_mermaid_generated(self):
++        activities = [_make_activity(), _make_activity(title="Update CRM", app="Salesforce")]
++        session = _make_session(activities=activities)
++        result = analyze_session(session)
++        assert result["process_map_mermaid"].startswith("flowchart TD")
++        assert "s1 --> s2" in result["process_map_mermaid"]
++
++    def test_summary_is_non_empty_string(self):
++        session = _make_session(activities=[_make_activity()])
++        result = analyze_session(session)
++        assert isinstance(result["summary"], str)
++        assert len(result["summary"]) > 10
++
++    def test_decision_detected_from_explicit_list(self):
++        activities = [
++            _make_activity(
++                title="Apply discount",
++                app="Salesforce",
++                decisions=["Grant 10% discount for orders > 500€"],
++            )
++        ]
++        session = _make_session(activities=activities)
++        result = analyze_session(session)
++        assert len(result["decisions"]) >= 1
++        assert "Grant 10%" in result["decisions"][0]["question"]
++
++    def test_documents_collected(self):
++        activities = [
++            _make_activity(
++                title="Look up pricing",
++                app="SharePoint",
++                documents_needed=["Pricing policy 2026", "Discount approval form"],
++            )
++        ]
++        session = _make_session(activities=activities)
++        result = analyze_session(session)
++        assert "Pricing policy 2026" in result["documents_needed"]
++
++    def test_coverage_score_increases_with_artifacts(self):
++        base = _make_session(activities=[_make_activity()])
++        with_artifacts = _make_session(
++            activities=[_make_activity(inputs=["email"], outputs=["crm_record"])]
++        )
++        base_result = analyze_session(base)
++        artifact_result = analyze_session(with_artifacts)
++        assert artifact_result["coverage_score"] >= base_result["coverage_score"]
++
++    def test_divergence_score_increases_with_irritants(self):
++        low_session = _make_session(activities=[_make_activity()])
++        high_session = _make_session(
++            activities=[
++                _make_activity(
++                    blockers=["Manual copy", "Context lost"],
++                    tags=["double_entry", "switch"],
++                )
++            ]
++        )
++        low_result = analyze_session(low_session)
++        high_result = analyze_session(high_session)
++        assert high_result["divergence_score"] >= low_result["divergence_score"]
++
++
++class TestKeywordExtraction:
++    def test_stopwords_excluded(self):
++        session = _make_session(goal="traiter les demandes des clients")
++        result = analyze_session(session)
++        assert "les" not in result["keywords"]
++        assert "des" not in result["keywords"]
++
++    def test_domain_terms_included(self):
++        session = _make_session(
++            goal="process invoices and update ERP",
++            process_context="finance-invoicing",
++        )
++        result = analyze_session(session)
++        # At least one of the domain terms should appear
++        assert any(kw in result["keywords"] for kw in ["invoices", "invoice", "finance", "erp", "update"])
++
++
++class TestCoverageScore:
++    def test_empty_activities(self):
++        assert _coverage_score([]) == 0.0
++
++    def test_score_bounded(self):
++        from thefabric.models import SessionActivity
++        from dataclasses import fields
++        acts = [
++            SessionActivity(
++                title="step",
++                app="App",
++                action="read",
++                start="2026-01-01T08:00:00",
++                end="2026-01-01T09:00:00",
++                inputs=["doc"],
++                outputs=["record"],
++            )
++        ]
++        score = _coverage_score(acts)
++        assert 0.0 <= score <= 1.0
+diff --git a/thefabric/cli.py b/thefabric/cli.py
+index 859c6db..be47641 100644
+--- a/thefabric/cli.py
++++ b/thefabric/cli.py
+@@ -2,58 +2,177 @@ from __future__ import annotations
+ 
+ import argparse
+ import json
++import os
++import sys
++import warnings
+ from pathlib import Path
+ 
+ from .engine import run_thefabric
+ from .models import DailySession
+ 
++# Default LLM model for PySpur nodes — override via --pyspur-model or PYSPUR_MODEL env var.
++_DEFAULT_PYSPUR_MODEL = "openai/chatgpt-4o-latest"
++
+ 
+ def main() -> int:
+-    parser = argparse.ArgumentParser(description="TheFabric CLI")
++    parser = argparse.ArgumentParser(
++        description=(
++            "TheFabric — Daily session orchestrator "
++            "(Jean-Marc + PySpur + Hermes + BundleFabric + KFabric)"
++        )
++    )
+     subparsers = parser.add_subparsers(dest="command", required=True)
+ 
+-    run_parser = subparsers.add_parser("run", help="Analyze a daily session and generate all TheFabric artifacts")
+-    run_parser.add_argument("--input", required=True, help="Path to the JSON session file")
+-    run_parser.add_argument("--output", required=True, help="Output directory for generated artifacts")
++    # ── run command ───────────────────────────────────────────────────────────
++    run_parser = subparsers.add_parser(
++        "run",
++        help="Analyse a daily session JSON and generate all TheFabric artifacts",
++    )
++    run_parser.add_argument(
++        "--input", "-i",
++        required=True,
++        help="Path to the JSON session file (DailySession format)",
++    )
++    run_parser.add_argument(
++        "--output", "-o",
++        default="./artifacts",
++        help="Output directory for generated artifacts (default: ./artifacts)",
++    )
+     run_parser.add_argument(
+         "--bundlefabric-dir",
+-        default=str(_default_bundlefabric_dir()),
+-        help="Path to the BundleFabric bundles directory",
++        default=None,
++        help=(
++            "Path to the BundleFabric bundles directory. "
++            "Default: ../bundlefabric/bundles relative to this repo root. "
++            "If not found, bundle search is skipped and a new bundle is always created."
++        ),
++    )
++    run_parser.add_argument(
++        "--kfabric-url",
++        default=os.environ.get("KFABRIC_URL"),
++        help="Base URL for a running KFabric API (e.g. http://localhost:8000). "
++             "If omitted, only the query plan is generated without submitting.",
++    )
++    run_parser.add_argument(
++        "--kfabric-api-key",
++        default=os.environ.get("KFABRIC_API_KEY"),
++        help="Optional API key for KFabric (Bearer token).",
++    )
++    run_parser.add_argument(
++        "--pyspur-model",
++        default=os.environ.get("PYSPUR_MODEL", _DEFAULT_PYSPUR_MODEL),
++        help=(
++            "LLM model for PySpur nodes. Use PySpur provider/model format. "
++            "Examples: openai/chatgpt-4o-latest, anthropic/claude-sonnet-4-6, ollama/mistral. "
++            "Default: openai/chatgpt-4o-latest (override via PYSPUR_MODEL env var)."
++        ),
++    )
++    run_parser.add_argument(
++        "--pyspur-url",
++        default=os.environ.get("PYSPUR_URL"),
++        help="Base URL of a running PySpur instance (e.g. http://localhost:6080). "
++             "If set, the generated workflow definition will be submitted via POST /api/v1/workflows.",
+     )
+-    run_parser.add_argument("--kfabric-url", default=None, help="Optional base URL for a running KFabric API")
+-    run_parser.add_argument("--kfabric-api-key", default=None, help="Optional API key for KFabric")
+ 
+     args = parser.parse_args()
+ 
+     if args.command == "run":
+-        session = _load_session(Path(args.input))
+-        payload = run_thefabric(
+-            session=session,
+-            output_dir=Path(args.output),
+-            bundlefabric_bundles_dir=Path(args.bundlefabric_dir),
+-            kfabric_url=args.kfabric_url,
+-            kfabric_api_key=args.kfabric_api_key,
+-        )
+-        print(
+-            json.dumps(
+-                {
+-                    "status": "ok",
+-                    "session_id": session.session_id,
+-                    "output_dir": str(Path(args.output).resolve()),
+-                    "selected_bundle": payload["bundlefabric"]["selected_bundle"]["bundle_id"],
+-                },
+-                indent=2,
+-            )
+-        )
+-        return 0
++        return _cmd_run(args)
+ 
+     return 1
+ 
+ 
++def _cmd_run(args: argparse.Namespace) -> int:
++    input_path = Path(args.input)
++    if not input_path.exists():
++        print("ERROR: input file not found: {0}".format(input_path), file=sys.stderr)
++        return 1
++
++    session = _load_session(input_path)
++
++    # Resolve bundlefabric dir
++    bundlefabric_dir = _resolve_bundlefabric_dir(args.bundlefabric_dir)
++
++    payload = run_thefabric(
++        session=session,
++        output_dir=Path(args.output),
++        bundlefabric_bundles_dir=bundlefabric_dir,
++        kfabric_url=args.kfabric_url,
++        kfabric_api_key=args.kfabric_api_key,
++        pyspur_model=args.pyspur_model,
++    )
++
++    # Optionally submit workflow to running PySpur instance
++    if args.pyspur_url:
++        _submit_pyspur_workflow(args.pyspur_url, payload["pyspur"]["workflow_template"])
++
++    selected = payload["bundlefabric"].get("selected_bundle", {})
++    print(json.dumps(
++        {
++            "status": "ok",
++            "session_id": session.session_id,
++            "output_dir": str(Path(args.output).resolve()),
++            "domain": payload["analysis"]["process_context"],
++            "selected_bundle": selected.get("bundle_id", "none"),
++            "bundle_score": selected.get("score", 0.0),
++            "created_bundle": payload["bundlefabric"].get("created_bundle_id"),
++            "pyspur_model": args.pyspur_model,
++        },
++        indent=2,
++    ))
++    return 0
++
++
+ def _load_session(path: Path) -> DailySession:
+     return DailySession.from_dict(json.loads(path.read_text(encoding="utf-8")))
+ 
+ 
+-def _default_bundlefabric_dir() -> Path:
+-    repo_root = Path(__file__).resolve().parents[1]
+-    return repo_root.parent / "bundlefabric" / "bundles"
++def _resolve_bundlefabric_dir(cli_value: str | None) -> Path:
++    """Return the BundleFabric bundles directory, with a warning if it doesn't exist."""
++    if cli_value:
++        path = Path(cli_value)
++    else:
++        # Default: ../bundlefabric/bundles relative to repo root
++        repo_root = Path(__file__).resolve().parents[1]
++        path = repo_root.parent / "bundlefabric" / "bundles"
++
++    if not path.exists():
++        print(
++            "WARNING: BundleFabric bundles dir not found at '{dir}'. "
++            "Bundle search will be skipped — a new bundle will always be created. "
++            "Clone fbailleux2/bundlefabric alongside this repo, or pass --bundlefabric-dir.".format(
++                dir=path
++            ),
++            file=sys.stderr,
++        )
++    return path
++
++
++def _submit_pyspur_workflow(pyspur_url: str, workflow: dict) -> None:
++    """POST the workflow definition to a running PySpur instance."""
++    import json as _json
++    import urllib.error
++    import urllib.request
++
++    url = pyspur_url.rstrip("/") + "/api/v1/workflows"
++    data = _json.dumps(workflow).encode("utf-8")
++    req = urllib.request.Request(
++        url=url,
++        data=data,
++        headers={"Content-Type": "application/json"},
++        method="POST",
++    )
++    try:
++        with urllib.request.urlopen(req, timeout=30) as resp:
++            body = resp.read().decode("utf-8")
++            result = _json.loads(body) if body else {}
++            print("PySpur workflow submitted: id={0}".format(result.get("id", "?")))
++    except urllib.error.HTTPError as exc:
++        print(
++            "WARNING: PySpur submission failed (HTTP {code}): {body}".format(
++                code=exc.code, body=exc.read().decode("utf-8", errors="replace")
++            ),
++            file=sys.stderr,
++        )
++    except Exception as exc:
++        print("WARNING: PySpur submission error: {0}".format(exc), file=sys.stderr)
+diff --git a/thefabric/engine.py b/thefabric/engine.py
+index 232febb..f731706 100644
+--- a/thefabric/engine.py
++++ b/thefabric/engine.py
+@@ -19,12 +19,13 @@ def run_thefabric(
+     bundlefabric_bundles_dir: Path,
+     kfabric_url: Optional[str] = None,
+     kfabric_api_key: Optional[str] = None,
++    pyspur_model: str = "openai/chatgpt-4o-latest",
+ ) -> Dict[str, Any]:
+     output_dir.mkdir(parents=True, exist_ok=True)
+ 
+     analysis = analyze_session(session)
+     jean_marc_payload = build_jean_marc_payload(session, analysis)
+-    pyspur_workflow = build_pyspur_workflow(session, analysis)
++    pyspur_workflow = build_pyspur_workflow(session, analysis, llm_model=pyspur_model)
+     kfabric_plan = build_kfabric_plan(session, analysis, base_url=kfabric_url, api_key=kfabric_api_key)
+     bundle_resolution = resolve_bundle(session, analysis, bundlefabric_bundles_dir, output_dir)
+     hermes_payload = build_hermes_payload(session, analysis, bundle_resolution, kfabric_plan, output_dir)
+diff --git a/thefabric/integrations/bundlefabric.py b/thefabric/integrations/bundlefabric.py
+index a49d38c..4bfae92 100644
+--- a/thefabric/integrations/bundlefabric.py
++++ b/thefabric/integrations/bundlefabric.py
+@@ -97,7 +97,11 @@ def _score_bundle(analysis: Dict[str, Any], manifest: Dict[str, Any]) -> tuple:
+ 
+ def _tps_score(manifest: Dict[str, Any]) -> float:
+     temporal = manifest.get("temporal", {})
+-    freshness = _as_float(temporal.get("freshness_score"), 0.5)
++    # Real BundleFabric manifests use "freshness" (not "freshness_score") — support both.
++    freshness = _as_float(
++        temporal.get("freshness") if temporal.get("freshness") is not None else temporal.get("freshness_score"),
++        0.5,
++    )
+     usage_frequency = _as_float(temporal.get("usage_frequency"), 0.5)
+     ecosystem_alignment = _as_float(temporal.get("ecosystem_alignment"), 0.5)
+     return round(freshness * 0.4 + usage_frequency * 0.3 + ecosystem_alignment * 0.3, 4)
+@@ -105,7 +109,8 @@ def _tps_score(manifest: Dict[str, Any]) -> float:
+ 
+ def _recency_score(manifest: Dict[str, Any]) -> float:
+     temporal = manifest.get("temporal", {})
+-    raw = temporal.get("last_updated")
++    # Support both "last_updated" (TheFabric bundles) and "updated_at" (real BundleFabric manifests)
++    raw = temporal.get("last_updated") or manifest.get("updated_at")
+     if not raw:
+         return 0.5
+     try:
+diff --git a/thefabric/integrations/jean_marc.py b/thefabric/integrations/jean_marc.py
+index 1013fb6..804178b 100644
+--- a/thefabric/integrations/jean_marc.py
++++ b/thefabric/integrations/jean_marc.py
+@@ -1,61 +1,130 @@
++"""Jean-Marc integration.
++
++Generates payloads compatible with Jean-Marc's actual Pydantic schema
++(fbailleux2/jean-marc, schema_version 2.0).
++
++Jean-Marc field mapping (from src/jean_marc/models.py):
++  ProcessAnalysis:
++    declared_steps: list[ProcedureStep]      {order, action, application, is_declared}
++    observed_steps: list[ObservedStep]       {order, action, application, duration_seconds, irritant_kind}
++    irritants:      list[Irritant]           {kind (IrritantKind enum), severity, description, at_step,
++                                              estimated_time_loss_seconds}
++    artifacts:      list[ArtifactIO]         {name, kind (ArtifactKind), direction, application}
++    recommendations: list[ProcessRecommendation]  {rec_type, description, estimated_gain_percent,
++                                                    complexity, target_applications}
++    procedure_state: ProcedureState enum     (declared|observed|validated|automatable)
++
++  FieldObservation:
++    declared_procedure: str
++    real_procedure_summary: str
++    gap_description: str
++    total_irritant_severity: float
++    automatable: bool
++"""
++
+ from __future__ import annotations
+ 
++import uuid
+ from datetime import datetime
+-from typing import Any, Dict
++from typing import Any, Dict, List
+ 
+ from ..models import DailySession
+ 
++# ── IrritantKind enum values (jean-marc) ──────────────────────────────────────
++_IRRITANT_KIND_MAP = {
++    "double_entry": "double_entry",
++    "context_switch": "context_switching",   # TheFabric internal → Jean-Marc
++    "context_switching": "context_switching",
++    "search": "lookup",                      # TheFabric "search" → Jean-Marc "lookup"
++    "lookup": "lookup",
++    "waiting": "waiting",
++    "manual_transcription": "manual_entry",  # TheFabric internal → Jean-Marc
++    "manual_entry": "manual_entry",
++    "rework": "rework",
++    "approval_delay": "approval_delay",
++}
++
++# ── ArtifactKind enum values (jean-marc) ──────────────────────────────────────
++_ARTIFACT_KIND_MAP = {
++    "email": "email",
++    "erp_record": "erp_record",
++    "pdf": "pdf",
++    "file": "file",
++    "message": "email",     # closest jean-marc kind
++    "form": "form",
++    "generic": "file",
++    "spreadsheet": "file",
++}
++
++# ── RecType enum values (jean-marc) ───────────────────────────────────────────
++_REC_TYPE_KEYWORDS = {
++    "automatiser": "automate",
++    "confier": "delegate",
++    "publier": "simplify",
++    "construire": "simplify",
++    "eliminer": "eliminate",
++}
++
+ 
+ def build_jean_marc_payload(session: DailySession, analysis: Dict[str, Any]) -> Dict[str, Any]:
++    """Build a Jean-Marc schema-compatible payload from TheFabric analysis.
++
++    Returns a dict with two top-level keys:
++      - process_analysis  (maps to jean-marc ProcessAnalysis)
++      - field_observation (maps to jean-marc FieldObservation)
++    """
+     generated_at = datetime.utcnow().isoformat() + "Z"
++    analysis_id = str(uuid.uuid4())
++    observation_id = str(uuid.uuid4())
++
+     process_analysis = {
+-        "id": "analysis-{0}".format(session.session_id),
+-        "process_context": analysis["process_context"],
+-        "procedure_id": "declared-{0}".format(session.process_context),
+-        "procedure_name": session.process_context.replace("-", " ").title(),
+-        "declared_steps": [],
+-        "observed_steps": analysis["observed_steps"],
+-        "decisions": analysis["decisions"],
+-        "irritants": analysis["irritants"],
+-        "input_artifacts": analysis["input_artifacts"],
+-        "output_artifacts": analysis["output_artifacts"],
+-        "business_rules": analysis["business_rules"],
+-        "recommendations": analysis["recommendations"],
+-        "supporting_patterns": analysis["supporting_patterns"],
+-        "coverage_score": analysis["coverage_score"],
+-        "divergence_score": analysis["divergence_score"],
+-        "summary": analysis["summary"],
+-        "process_map_mermaid": analysis["process_map_mermaid"],
+-        "generated_at": generated_at,
++        # ── Identity ──────────────────────────────────────────────────
++        "id": analysis_id,
++        "session_id": session.session_id,
++        "analysis_date": generated_at,
+         "schema_version": "2.0",
++        # ── Classification ────────────────────────────────────────────
++        "domain": analysis["process_context"],
++        "keywords": analysis["keywords"],
++        "procedure_state": _procedure_state(analysis),
++        # ── Steps ─────────────────────────────────────────────────────
++        "declared_steps": _to_declared_steps(session),
++        "observed_steps": _to_observed_steps(analysis["observed_steps"], analysis["irritants"]),
++        # ── Process intelligence ───────────────────────────────────────
++        "patterns": _to_patterns(analysis["supporting_patterns"]),
++        "artifacts": _to_artifacts(analysis["input_artifacts"] + analysis["output_artifacts"]),
++        "rules": _to_rules(analysis["business_rules"]),
++        "decision_points": _to_decision_points(analysis["decisions"]),
++        "irritants": _to_irritants(analysis["irritants"]),
++        "recommendations": _to_recommendations(analysis["recommendations"]),
++        # ── TheFabric extensions (prefixed, ignored by Jean-Marc validator) ──
++        "_thefabric_coverage_score": analysis["coverage_score"],
++        "_thefabric_divergence_score": analysis["divergence_score"],
++        "_thefabric_mermaid": analysis["process_map_mermaid"],
+     }
+ 
++    total_severity = sum(i.get("severity", 0.0) for i in analysis["irritants"])
++    automatable = total_severity > 1.0 or any(
++        i.get("severity", 0.0) > 0.8 for i in analysis["irritants"]
++    )
++
+     field_observation = {
+-        "id": "observation-{0}".format(session.session_id),
+-        "process_context": analysis["process_context"],
+-        "declared_procedure": session.declared_procedure or "Procedure declaree non fournie.",
+-        "observed_behavior": analysis["summary"],
+-        "gap_score": analysis["divergence_score"],
+-        "supporting_patterns": analysis["supporting_patterns"],
+-        "observed_steps": analysis["observed_steps"],
+-        "decisions": analysis["decisions"],
+-        "irritants": analysis["irritants"],
+-        "input_artifacts": analysis["input_artifacts"],
+-        "output_artifacts": analysis["output_artifacts"],
+-        "business_rules": analysis["business_rules"],
+-        "recommendations": analysis["recommendations"],
+-        "examples": [activity.title for activity in session.activities],
+-        "state": "observed",
+-        "metadata": {
+-            "status": "ready_for_validation",
+-            "origin": "thefabric",
+-            "process_map_mermaid": analysis["process_map_mermaid"],
+-            "analysis_report_markdown": _analysis_markdown(session, analysis),
+-        },
+-        "created_at": generated_at,
+-        "validated_at": None,
+-        "validated_by": None,
++        # ── Identity ──────────────────────────────────────────────────
++        "id": observation_id,
++        "session_id": session.session_id,
++        "analysis_id": analysis_id,
++        "observation_date": generated_at,
+         "schema_version": "2.0",
++        # ── Core observation fields (Jean-Marc FieldObservation) ───────
++        "declared_procedure": session.declared_procedure or "Procédure déclarée non fournie.",
++        "real_procedure_summary": _build_real_summary(analysis),
++        "gap_description": _build_gap_description(analysis),
++        "total_irritant_severity": round(total_severity, 3),
++        "automatable": automatable,
++        # ── TheFabric extensions ───────────────────────────────────────
++        "_thefabric_origin": "thefabric",
++        "_thefabric_validation_status": "ready_for_validation",
++        "_thefabric_analysis_markdown": _analysis_markdown(session, analysis),
+     }
+ 
+     return {
+@@ -64,31 +133,245 @@ def build_jean_marc_payload(session: DailySession, analysis: Dict[str, Any]) ->
+     }
+ 
+ 
++# ── Translators ───────────────────────────────────────────────────────────────
++
++def _procedure_state(analysis: Dict[str, Any]) -> str:
++    """Map TheFabric analysis metrics to Jean-Marc ProcedureState enum value."""
++    total_severity = sum(i.get("severity", 0.0) for i in analysis["irritants"])
++    if total_severity > 1.5 and analysis["recommendations"]:
++        return "automatable"
++    if analysis["divergence_score"] > 0.3:
++        return "observed"
++    return "declared"
++
++
++def _to_declared_steps(session: DailySession) -> List[Dict[str, Any]]:
++    """Build Jean-Marc ProcedureStep list from declared_procedure text."""
++    if not session.declared_procedure:
++        return []
++    lines = [line.strip() for line in session.declared_procedure.splitlines() if line.strip()]
++    return [
++        {
++            "order": i,
++            "action": line,
++            "application": "",
++            "duration_seconds": None,
++            "is_declared": True,
++        }
++        for i, line in enumerate(lines)
++    ]
++
++
++def _to_observed_steps(
++    step_rows: List[Dict[str, Any]],
++    irritants: List[Dict[str, Any]],
++) -> List[Dict[str, Any]]:
++    """Convert TheFabric step rows to Jean-Marc ObservedStep format (0-based order)."""
++    # Map each impacted step label to its first irritant_kind
++    irritant_by_label: Dict[str, str] = {}
++    for irritant in irritants:
++        jean_marc_kind = _IRRITANT_KIND_MAP.get(irritant.get("kind", ""), None)
++        for step_label in irritant.get("impacted_steps", []):
++            if step_label not in irritant_by_label:
++                irritant_by_label[step_label] = jean_marc_kind
++
++    return [
++        {
++            "order": row["position"] - 1,           # Jean-Marc is 0-based
++            "action": row["label"],
++            "application": row.get("app") or "",
++            "duration_seconds": row.get("average_duration_seconds") or None,
++            "irritant_kind": irritant_by_label.get(row["label"]),
++            "deviation_from_declared": None,        # requires human annotation
++        }
++        for row in step_rows
++    ]
++
++
++def _to_patterns(supporting_patterns: List[str]) -> List[Dict[str, Any]]:
++    """Convert TheFabric supporting_patterns strings to Jean-Marc PatternHypothesis format.
++
++    Input format: "App1 -> App2 (x3)"
++    """
++    patterns = []
++    for raw in supporting_patterns:
++        parts = raw.split(" (x")
++        sequence_part = parts[0].strip()
++        try:
++            freq = int(parts[1].rstrip(")")) if len(parts) > 1 else 1
++        except (ValueError, IndexError):
++            freq = 1
++        apps = [s.strip() for s in sequence_part.split("->")]
++        patterns.append({
++            "sequence": apps,
++            "frequency": freq,
++            "applications": list(dict.fromkeys(apps)),
++            "confidence": round(min(0.95, 0.5 + freq * 0.1), 3),
++            "irritant_kind": None,
++        })
++    return patterns
++
++
++def _to_artifacts(artifacts: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
++    """Convert TheFabric artifacts to Jean-Marc ArtifactIO format."""
++    return [
++        {
++            "name": a["name"],
++            "kind": _ARTIFACT_KIND_MAP.get(a.get("kind", "generic"), "file"),
++            "direction": a["direction"],            # "input" | "output"
++            "application": a.get("source", ""),
++        }
++        for a in artifacts
++    ]
++
++
++def _to_rules(business_rules: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
++    """Convert TheFabric business_rules to Jean-Marc BusinessRule format."""
++    return [
++        {
++            "condition": r["condition"],
++            "action": r["outcome"],
++            "applications": [r["source"]] if r.get("source") else [],
++        }
++        for r in business_rules
++    ]
++
++
++def _to_decision_points(decisions: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
++    """Convert TheFabric decisions to Jean-Marc DecisionPoint format."""
++    result = []
++    for d in decisions:
++        # Extract step index from id like "decision-3"
++        try:
++            at_step = int(d["id"].split("-")[-1]) - 1
++        except (ValueError, IndexError):
++            at_step = 0
++        result.append({
++            "at_step": at_step,
++            "question": d["question"],
++            "options": [r["outcome"] for r in d.get("rules", [])],
++        })
++    return result
++
++
++def _to_irritants(irritants: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
++    """Convert TheFabric irritants to Jean-Marc Irritant format.
++
++    Jean-Marc Irritant fields:
++      kind (IrritantKind), severity, at_step, description, estimated_time_loss_seconds
++    """
++    time_loss_defaults = {
++        "double_entry": 120,
++        "context_switching": 30,
++        "rework": 300,
++        "waiting": 600,
++        "lookup": 60,
++        "approval_delay": 900,
++        "manual_entry": 90,
++    }
++    result = []
++    for irr in irritants:
++        jean_marc_kind = _IRRITANT_KIND_MAP.get(irr.get("kind", ""), "manual_entry")
++        freq = irr.get("frequency", 1)
++        time_loss = time_loss_defaults.get(jean_marc_kind, 60) * freq
++        result.append({
++            "kind": jean_marc_kind,
++            "severity": irr.get("severity", 0.5),
++            "at_step": None,        # step-level correlation requires further work
++            "description": irr.get("description", irr.get("title", "")),
++            "estimated_time_loss_seconds": float(time_loss),
++        })
++    return result
++
++
++def _to_recommendations(recommendations: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
++    """Convert TheFabric recommendations to Jean-Marc ProcessRecommendation format."""
++    result = []
++    for rec in recommendations:
++        title_lower = rec["title"].lower()
++        rec_type = "simplify"
++        for keyword, mapped in _REC_TYPE_KEYWORDS.items():
++            if keyword in title_lower:
++                rec_type = mapped
++                break
++        result.append({
++            "rec_type": rec_type,
++            "description": rec["description"],
++            "estimated_gain_percent": round(rec.get("automation_potential", 0.5) * 100, 1),
++            "complexity": "medium",
++            "target_applications": [],
++        })
++    return result
++
++
++# ── Text helpers ──────────────────────────────────────────────────────────────
++
++def _build_real_summary(analysis: Dict[str, Any]) -> str:
++    apps = analysis.get("apps_used", [])
++    steps = analysis.get("observed_steps", [])
++    return (
++        "Observed {steps} steps across {n_apps} application(s): {app_list}. "
++        "Domain: {context}."
++    ).format(
++        steps=len(steps),
++        n_apps=len(apps),
++        app_list=", ".join(apps[:5]) + ("..." if len(apps) > 5 else ""),
++        context=analysis.get("process_context", "unknown"),
++    )
++
++
++def _build_gap_description(analysis: Dict[str, Any]) -> str:
++    declared_lines = analysis.get("declared_procedure", "") or ""
++    declared = len([l for l in declared_lines.splitlines() if l.strip()])
++    observed = len(analysis.get("observed_steps", []))
++    extra = max(0, observed - declared)
++    irritant_names = ", ".join(
++        i.get("title", i.get("kind", "?")) for i in analysis.get("irritants", [])[:3]
++    )
++    return (
++        "{extra} undeclared step(s) detected vs formal procedure. "
++        "Main friction: {irritants}. "
++        "Divergence score: {score:.2f}."
++    ).format(
++        extra=extra,
++        irritants=irritant_names or "none",
++        score=analysis.get("divergence_score", 0.0),
++    )
++
++
+ def _analysis_markdown(session: DailySession, analysis: Dict[str, Any]) -> str:
+     lines = [
+-        "# TheFabric -> Jean-Marc",
++        "# TheFabric → Jean-Marc",
+         "",
+         "## Processus",
+         analysis["process_context"],
+         "",
+-        "## Resume",
++        "## Résumé",
+         analysis["summary"],
+         "",
+-        "## Etapes observees",
++        "## Étapes observées",
+     ]
+     for step in analysis["observed_steps"]:
+-        lines.append("- {0}. {1} [{2}]".format(step["position"], step["label"], step["app"]))
++        lines.append("- {pos}. {label} [{app}]".format(
++            pos=step["position"], label=step["label"], app=step.get("app") or "?"
++        ))
+ 
+-    lines.extend(["", "## Decisions"])
++    lines.extend(["", "## Décisions"])
+     if analysis["decisions"]:
+-        for decision in analysis["decisions"]:
+-            lines.append("- {0}: {1}".format(decision["step_label"], decision["question"]))
++        for d in analysis["decisions"]:
++            lines.append("- {label}: {question}".format(
++                label=d["step_label"], question=d["question"]
++            ))
+     else:
+-        lines.append("- Aucune decision explicite")
++        lines.append("- Aucune décision explicite")
++
++    lines.extend(["", "## Irritants"])
++    for irr in analysis["irritants"]:
++        lines.append("- [{kind}] {title} (sévérité {severity:.2f})".format(**irr))
+ 
+     lines.extend(["", "## Recommandations"])
+-    for recommendation in analysis["recommendations"]:
+-        lines.append("- {0}: {1}".format(recommendation["title"], recommendation["description"]))
++    for rec in analysis["recommendations"]:
++        lines.append("- {title}: {description}".format(**rec))
+ 
+-    lines.extend(["", "## Contexte complementaire", session.additional_context or "_Aucun._"])
++    lines.extend(["", "## Contexte complémentaire", session.additional_context or "_Aucun._"])
+     return "\n".join(lines)
+diff --git a/thefabric/integrations/pyspur.py b/thefabric/integrations/pyspur.py
+index 39aa349..53a1e00 100644
+--- a/thefabric/integrations/pyspur.py
++++ b/thefabric/integrations/pyspur.py
+@@ -6,7 +6,20 @@ from typing import Any, Dict, List
+ from ..models import DailySession
+ 
+ 
+-def build_pyspur_workflow(session: DailySession, analysis: Dict[str, Any]) -> Dict[str, Any]:
++def build_pyspur_workflow(
++    session: DailySession,
++    analysis: Dict[str, Any],
++    llm_model: str = "openai/chatgpt-4o-latest",
++) -> Dict[str, Any]:
++    """Build a PySpur workflow definition from TheFabric analysis.
++
++    Args:
++        session: The DailySession being processed.
++        analysis: Output of analyze_session().
++        llm_model: LLM model identifier as used by PySpur (e.g. "openai/chatgpt-4o-latest",
++                   "anthropic/claude-sonnet-4-6", "ollama/mistral"). Defaults to OpenAI GPT-4o.
++                   Set via --pyspur-model CLI flag or PYSPUR_MODEL env var.
++    """
+     input_schema = {
+         "session_summary": "string",
+         "process_context": "string",
+@@ -85,7 +98,7 @@ def build_pyspur_workflow(session: DailySession, analysis: Dict[str, Any]) -> Di
+                 "output_json_schema": planner_output_json,
+                 "has_fixed_output": False,
+                 "llm_info": {
+-                    "model": "openai/chatgpt-4o-latest",
++                    "model": llm_model,
+                     "max_tokens": 4096,
+                     "temperature": 0.2,
+                     "top_p": 0.9,
+@@ -122,7 +135,7 @@ def build_pyspur_workflow(session: DailySession, analysis: Dict[str, Any]) -> Di
+                 "output_json_schema": delivery_output_json,
+                 "has_fixed_output": False,
+                 "llm_info": {
+-                    "model": "openai/chatgpt-4o-latest",
++                    "model": llm_model,
+                     "max_tokens": 4096,
+                     "temperature": 0.3,
+                     "top_p": 0.9,
+-- 
+2.43.0
+
